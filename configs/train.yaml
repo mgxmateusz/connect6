@@ -135,5 +135,5 @@ training:
   amp_dtype: "bfloat16"     # bfloat16 | float16
 
   # Przy numeracji od 1 checkpoint_every_updates: 10 zapisuje 10,20,30,...
-  checkpoint_every_updates: 10
-  dashboard_every_updates: 5
+  checkpoint_every_updates: 1
+  dashboard_every_updates: 1
