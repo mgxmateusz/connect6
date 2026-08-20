@@ -1,0 +1,138 @@
+# =============================================================================
+# KONFIGURACJA TRENINGU CONNECT6 - CZYSTE MLP
+# =============================================================================
+
+run:
+  # Nowa nazwa, ponieważ checkpointy ze starego CNN nie są zgodne z tym MLP.
+  name: "connect6_mlp_01"
+  root_dir: "runs"
+  seed: 42
+
+  # auto = wznów z runs/<name>/checkpoints/latest.pt, jeśli istnieje
+  # none = rozpocznij od zera
+  # można też podać bezpośrednią ścieżkę do konkretnego pliku .pt
+  resume: "auto"
+
+game:
+  board_size: 19
+  win_length: 6
+  debug_checks: false
+
+model:
+  architecture_version: 3
+
+  # ==========================================================================
+  # ARCHITEKTURA JEDNEGO ZWYKŁEGO MLP
+  # ==========================================================================
+  # Dla planszy 19x19 wejście ma 724 wartości:
+  #   361 = moje kamienie
+  #   361 = kamienie przeciwnika
+  #     1 = stones_left / 2
+  #     1 = is_black
+  #
+  # Czyli model dostaje jeden zwykły wektor:
+  #   724 -> ...
+  #
+  # Każdą warstwę ustawiasz osobno:
+  #   neurons    = liczba neuronów
+  #   norm       = none | layer | batch
+  #   activation = silu | gelu | relu | tanh | sigmoid | none
+  #   dropout    = 0.0 ... <1.0
+  #
+  # Chcesz np. 724 -> 1024 -> 512 -> 128 -> 256 -> 64?
+  # Po prostu wpisujesz warstwy dokładnie w takiej kolejności.
+  # ==========================================================================
+
+  # Główne warstwy wspólne dla całego modelu.
+  layers:
+    - neurons: 512
+      norm: layer
+      activation: silu
+      dropout: 0.0
+
+    - neurons: 512
+      norm: none
+      activation: silu
+      dropout: 0.0
+
+    - neurons: 256
+      norm: layer
+      activation: silu
+      dropout: 0.0
+
+    - neurons: 256
+      norm: layer
+      activation: silu
+      dropout: 0.0
+
+    - neurons: 128
+      norm: none
+      activation: silu
+      dropout: 0.0
+
+  # Dodatkowe warstwy tylko dla POLICY.
+  # POLICY na końcu automatycznie dostaje 361 wyjść - po jednym na każde pole.
+  # Jeśli nie chcesz dodatkowych warstw, zostaw pustą listę: []
+  policy_layers: []
+
+  # Dodatkowe warstwy tylko dla VALUE.
+  # VALUE na końcu automatycznie dostaje 1 wyjście z tanh, czyli zakres [-1, +1].
+  value_layers:
+    - neurons: 64
+      norm: none
+      activation: silu
+      dropout: 0.0
+
+  # Opcjonalna kompilacja modelu przez torch.compile.
+  compile: false
+  compile_mode: "default"  # default | reduce-overhead | max-autotune
+
+training:
+  device: "cuda"
+
+  # Liczba plansz rozgrywanych równolegle podczas self-play.
+  num_envs: 16384
+
+  # Do uczenia trafiają wyłącznie pełne partie.
+  # Po zebraniu co najmniej tylu pozycji z zakończonych partii wszystkie
+  # aktualnie niedokończone partie są wyrzucane, a PPO aktualizuje model.
+  completed_positions_per_update: 512
+
+  # Maksymalna liczba aktualizacji modelu.
+  updates: 100000
+
+  # --------------------------------------------------------------------------
+  # PPO
+  # --------------------------------------------------------------------------
+  ppo_epochs: 2 # maksymalna liczba epok, approx_kl i tak sam ogarnia limit
+  minibatch_size: 4096
+  learning_rate: 0.0003
+  lr_schedule: "cosine"     # constant | cosine
+  weight_decay: 0.0001
+  adam_eps: 0.00001
+  clip_coef: 0.2
+  value_coef: 0.50
+  entropy_coef: 0.015
+  max_grad_norm: 1.0
+  target_kl: 0.03
+  normalize_advantage: true
+
+  # Na razie wyłączone, aby nie psuć old_logprob używanego przez PPO.
+  symmetry_augmentation: false
+
+  # --------------------------------------------------------------------------
+  # EKSPLORACJA PODCZAS SELF-PLAY
+  # --------------------------------------------------------------------------
+  # 1.0 oznacza zwykły softmax.
+  # Wartość poniżej 1.0 wyostrza rozkład i częściej wybiera najlepsze logity.
+  temperature_start: 1.00
+  temperature_end: 1.00
+  temperature_decay_updates: 5000
+
+  # Mixed precision na GPU.
+  amp: true
+  amp_dtype: "bfloat16"     # bfloat16 | float16
+
+  # Autosave i dashboard.
+  checkpoint_every_updates: 10
+  dashboard_every_updates: 5

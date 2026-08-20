@@ -1,0 +1,4 @@
+# Install PyTorch separately with the CUDA build appropriate for your GPU.
+numpy>=2.0
+PyYAML>=6.0
+pytest>=8.0

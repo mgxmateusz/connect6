@@ -1,0 +1,52 @@
+# =============================================================================
+# KING OF CONNECT6 — TRUE PARALLEL AI CHAMPIONSHIP
+# =============================================================================
+
+championship:
+
+  # Katalog z model_update_XXXXXXXX.pt
+  checkpoint_dir: "runs/connect6_mlp_01/checkpoints"
+
+  # Wyniki: matches.csv, ranking.csv, championship.html, state.json
+  output_dir: "runs/connect6_mlp_01/championship"
+
+  # LICZBA PRAWDZIWIE RÓWNOLEGŁYCH STOŁÓW GPU.
+  #
+  # tables: 4 oznacza:
+  # - do 4 pojedynków liczonych równolegle,
+  # - 4 różne modele-hosty są scalone do jednego BatchedPolicyEnsemble,
+  # - każda warstwa hostów jest liczona jednym torch.bmm,
+  # - challenger liczy wszystkie swoje pozycje jednym zwykłym batchem,
+  # - wagowo w VRAM podczas rundy jest około tables + 1 modeli.
+  #
+  # Zwiększaj: 4 -> 8 -> 16 -> 32 i obserwuj szybkość oraz VRAM.
+  tables: 2048
+
+  # Liczba partii składających się na JEDEN pojedynek dwóch modeli.
+  # Musi być parzysta.
+  # 2 = 1 raz każdym kolorem
+  # 4 = 2 razy każdym kolorem
+  # 6 = 3 razy każdym kolorem
+  # Dopiero łączny wynik całej serii daje 3 / 1 / 0 pkt.
+  games_per_pair: 2
+
+  # 0.0 = deterministyczny argmax.
+  # Przy 0.0 i games_per_pair > 2 partie z tym samym układem kolorów
+  # mogą być identyczne.
+  temperature: 0.0
+
+  device: "cuda"
+
+  # AMP dotyczy tylko inference mistrzostw.
+  amp: true
+  amp_dtype: "bfloat16"
+
+  # Ile odchudzonych checkpointów (bez optimizer state) trzymać w RAM.
+  # Zmniejsza ponowne czytanie tych samych plików z dysku.
+  # 0 = bez cache.
+  cpu_cache_models: 16384
+
+  # Czy po wyrzuceniu grupy modeli czyścić nieużywany cache CUDA.
+  empty_cache_after_unload: true
+
+  seed: 12345

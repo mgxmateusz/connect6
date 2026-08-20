@@ -1,0 +1,19 @@
+na 1/8 stołów gra ze starymi wersjami by nie zapomieć (pamiętać nie uczyć na ruchach starej polityki, tylko na ruchach nowej walczącej ze starą)
+
+można go poszerzyć bo liczba kombinacji jest tak wielka że nie nauczy się idealnego ruchu dla danego położenia.
+
+
+dodać testy przy każdym checkpoincie gdzie walczy z poprzednimi checkpointami i podawać % wygranych z nimi.
+
+poszerzyć model, niekoniecznie głębszy ale szerszy powinien być:
+
+1024
+1024
+1024
+768
+512
+
+
+dodatkowo normy dać w każdym dla bezpieczeństwa
+
+
