@@ -57,6 +57,12 @@ class VectorConnect6:
             self.num_envs, dtype=torch.int16, device=self.device
         )
 
+        # Stały indeks batcha jest używany przy każdym ruchu. Nie tworzymy nowego
+        # torch.arange na GPU tysiące razy podczas collectora.
+        self._batch = torch.arange(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+
         # Przesunięcia używane do szybkiego sprawdzania linii tylko wokół
         # właśnie postawionego kamienia.
         k = torch.arange(
@@ -122,7 +128,7 @@ class VectorConnect6:
 
         rows = torch.div(actions, self.board_size, rounding_mode="floor")
         cols = actions.remainder(self.board_size)
-        batch = torch.arange(self.num_envs, device=self.device)
+        batch = self._batch
 
         if self.debug_checks:
             occupied = self.boards[batch, rows, cols].ne(0)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,41 @@ class BatchedLayer:
     eps: float = 1e-5
 
 
+class HistoricalCheckpointCache:
+    """Bounded LRU cache of lean historical checkpoints in system RAM.
+
+    Versioned checkpoints are immutable, therefore keeping their CPU model_state
+    tensors in RAM is safe. The cache is deliberately bounded so a long training
+    run can never consume all host memory just because the checkpoint directory
+    keeps growing.
+    """
+
+    def __init__(self, max_models: int = 0) -> None:
+        self.max_models = max(0, int(max_models))
+        self._items: OrderedDict[Path, HistoricalCheckpoint] = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def get(self, path: str | Path) -> HistoricalCheckpoint:
+        key = Path(path)
+        cached = self._items.pop(key, None)
+        if cached is not None:
+            self._items[key] = cached
+            self.hits += 1
+            return cached
+
+        self.misses += 1
+        checkpoint = _load_lean_checkpoint(key)
+        if self.max_models > 0:
+            self._items[key] = checkpoint
+            while len(self._items) > self.max_models:
+                self._items.popitem(last=False)
+        return checkpoint
+
+
 def checkpoint_update(path: str | Path) -> int | None:
     match = _UPDATE_RE.search(Path(path).name)
     return int(match.group(1)) if match else None
@@ -63,7 +99,7 @@ def _lean_cache_path(checkpoint_path: Path) -> Path:
 
 
 def _load_lean_checkpoint(path: Path) -> HistoricalCheckpoint:
-    """Read a lightweight history payload, creating a sidecar cache if needed."""
+    """Read a lightweight history payload, creating a disk sidecar if needed."""
 
     update = checkpoint_update(path)
     if update is None:
@@ -86,7 +122,7 @@ def _load_lean_checkpoint(path: Path) -> HistoricalCheckpoint:
             torch.save(payload, tmp)
             tmp.replace(cache_path)
         except OSError:
-            # Cache is an optimization only. Failure must not kill training.
+            # Disk cache is only an optimization. Failure must not kill training.
             try:
                 if tmp.exists():
                     tmp.unlink()
@@ -110,13 +146,14 @@ def load_random_historical_checkpoints(
     requested_count: int,
     required_model_config: dict[str, Any] | None = None,
     required_game_config: dict[str, Any] | None = None,
+    ram_cache: HistoricalCheckpointCache | None = None,
 ) -> list[HistoricalCheckpoint]:
     """Choose a random compatible pool of old checkpoints for one PPO update.
 
-    `latest.pt` is ignored. Lean sidecars exclude optimizer state. One grouped bmm
-    requires identical tensor shapes, therefore every returned checkpoint belongs
-    to the same model/game family. If required_* is supplied, that exact current
-    family is used; otherwise the first compatible random checkpoint defines it.
+    `latest.pt` is ignored. Lean disk sidecars exclude optimizer state, while the
+    optional RAM LRU cache avoids repeated torch.load/deserialization for recently
+    used opponents. One grouped bmm requires identical tensor shapes, therefore
+    every returned checkpoint belongs to one compatible model/game family.
     """
 
     requested_count = max(0, int(requested_count))
@@ -156,7 +193,7 @@ def load_random_historical_checkpoints(
             break
 
         try:
-            checkpoint = _load_lean_checkpoint(path)
+            checkpoint = ram_cache.get(path) if ram_cache is not None else _load_lean_checkpoint(path)
         except (RuntimeError, KeyError, ValueError, OSError) as exc:
             print(f"[history] pomijam {path.name}: {exc}")
             continue
@@ -187,17 +224,23 @@ class HistoricalPolicyEnsemble:
     assigned tables and have shape [MODELS, TABLES_PER_MODEL, IN]. Each MLP layer
     is one torch.bmm across every historical model instead of a Python loop issuing
     tiny forwards. Only the shared trunk and policy head are materialized.
+
+    `dtype` controls only frozen opponent inference storage/compute. It does not
+    alter the trainable current model architecture or its LayerNorm modules.
     """
 
     def __init__(
         self,
         checkpoints: list[HistoricalCheckpoint],
         device: torch.device,
+        *,
+        dtype: torch.dtype | None = None,
     ) -> None:
         if not checkpoints:
             raise ValueError("HistoricalPolicyEnsemble wymaga co najmniej 1 checkpointu")
 
         self.device = device
+        self.dtype = dtype or torch.float32
         self.num_models = len(checkpoints)
         self.updates = [cp.update for cp in checkpoints]
         self.paths = [cp.path for cp in checkpoints]
@@ -230,7 +273,11 @@ class HistoricalPolicyEnsemble:
             tensor = torch.stack([state[key].detach().cpu() for state in states], dim=0)
         except KeyError as exc:
             raise KeyError(f"Brak parametru {key} w historycznych checkpointach") from exc
-        return tensor.to(self.device, non_blocking=True)
+        return tensor.to(
+            device=self.device,
+            dtype=self.dtype,
+            non_blocking=True,
+        )
 
     def _stack_optional(
         self,
@@ -298,9 +345,10 @@ class HistoricalPolicyEnsemble:
             x = x + layer.bias.unsqueeze(1)
 
         if layer.norm == "layer":
-            mean = x.mean(dim=-1, keepdim=True)
-            var = (x - mean).pow(2).mean(dim=-1, keepdim=True)
-            x = (x - mean) * torch.rsqrt(var + layer.eps)
+            # F.layer_norm uses the same biased variance convention as nn.LayerNorm
+            # but can use a fused CUDA implementation. Per-model affine parameters
+            # are applied afterwards because their leading model dimension differs.
+            x = F.layer_norm(x, (x.shape[-1],), weight=None, bias=None, eps=layer.eps)
             if layer.norm_weight is not None:
                 x = x * layer.norm_weight.unsqueeze(1)
             if layer.norm_bias is not None:
@@ -326,6 +374,9 @@ class HistoricalPolicyEnsemble:
                 f"Niepoprawny history batch {tuple(x.shape)}; oczekiwano "
                 f"[{self.num_models}, T, {self.input_size}]"
             )
+
+        if x.device != self.device or x.dtype != self.dtype:
+            x = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
         for layer in self.shared_layers:
             x = self._apply_layer(x, layer)

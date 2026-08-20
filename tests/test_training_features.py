@@ -65,7 +65,7 @@ def test_temperature_uses_one_based_update_numbers():
     assert _temperature(11, cfg) == pytest.approx(0.5)
 
 
-def test_historical_fraction_is_split_evenly_and_fixed_per_model():
+def test_historical_fraction_is_split_evenly_and_colors_are_balanced():
     mask, opponent_ids, colors = _historical_layout(
         num_envs=100,
         fraction=0.25,
@@ -80,12 +80,39 @@ def test_historical_fraction_is_split_evenly_and_fixed_per_model():
     assert torch.all(opponent_ids[~mask] == -1)
     assert set(colors[mask].tolist()).issubset({-1, 1})
 
+    # Every old model gets its own near-50/50 color split. For odd table counts
+    # the unavoidable extra table alternates color between consecutive models.
+    for model_id in range(4):
+        model_mask = opponent_ids.eq(model_id)
+        black = int((colors[model_mask] == 1).sum().item())
+        white = int((colors[model_mask] == -1).sum().item())
+        assert abs(black - white) <= 1
+
+    total_black = int((colors[mask] == 1).sum().item())
+    total_white = int((colors[mask] == -1).sum().item())
+    assert abs(total_black - total_white) <= 1
+
     table_matrix, valid = _historical_table_matrix(opponent_ids, 4)
     assert int(valid.sum().item()) == 25
     assert table_matrix.shape[0] == 4
     for model_id in range(4):
         tables = table_matrix[model_id][valid[model_id]]
         assert torch.all(opponent_ids[tables] == model_id)
+
+
+def test_historical_layout_with_fewer_models_never_drops_tables():
+    mask, opponent_ids, colors = _historical_layout(
+        num_envs=16,
+        fraction=0.5,
+        historical_models=3,
+        device=torch.device("cpu"),
+    )
+
+    # 8 requested history tables split 3/3/2. Nothing is lost or duplicated.
+    assert int(mask.sum().item()) == 8
+    counts = [int(opponent_ids.eq(i).sum().item()) for i in range(3)]
+    assert counts == [3, 3, 2]
+    assert abs(int((colors[mask] == 1).sum()) - int((colors[mask] == -1).sum())) <= 1
 
 
 def test_grouped_history_ensemble_matches_individual_models_on_cpu():
@@ -95,7 +122,7 @@ def test_grouped_history_ensemble_matches_individual_models_on_cpu():
         "architecture_version": 3,
         "layers": [
             {"neurons": 12, "norm": "layer", "activation": "silu", "dropout": 0.0},
-            {"neurons": 8, "norm": "none", "activation": "silu", "dropout": 0.0},
+            {"neurons": 8, "norm": "layer", "activation": "silu", "dropout": 0.0},
         ],
         "policy_layers": [],
         "value_layers": [

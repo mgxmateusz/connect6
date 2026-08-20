@@ -106,15 +106,16 @@ class TrainingLogger:
             },
             {
                 "id": "kl_chart",
-                "title": "Approx KL — przebieg i limit early-stop",
+                "title": "Approx KL — przebieg i limity early-stop",
                 "metrics": [
                     {"key": "approx_kl_mean", "fallback": "approx_kl", "label": "KL mean"},
                     {"key": "approx_kl_p95", "label": "KL p95"},
                     {"key": "approx_kl_max", "label": "KL max"},
                     {"key": "approx_kl_last", "label": "KL last"},
-                    {"key": "target_kl", "label": "Target KL", "smooth": False},
+                    {"key": "target_kl", "label": "Soft target", "smooth": False},
+                    {"key": "kl_hard_limit", "label": "Hard limit", "smooth": False},
                 ],
-                "description": "Early-stop reaguje na pojedynczy minibatch, dlatego średnia sama nie wystarcza. Max/last pokazują faktyczne przekroczenia target_kl.",
+                "description": "Soft-stop używa średniej kroczącej KL, a hard-stop pojedynczego skrajnego minibatcha. Minibatch wywołujący stop nie jest aplikowany.",
             },
             {
                 "id": "ppo_execution_chart",
@@ -228,6 +229,39 @@ class TrainingLogger:
                 "description": "Pozwala ocenić koszt historycznego self-play i PPO względem wcześniejszych etapów treningu.",
             },
             {
+                "id": "timing_chart",
+                "title": "Czas poszczególnych części update'u",
+                "metrics": [
+                    {"key": "history_load_seconds", "label": "History load CPU"},
+                    {"key": "history_build_seconds", "label": "History build GPU submit"},
+                    {"key": "collector_seconds", "label": "Collector"},
+                    {"key": "ppo_seconds", "label": "PPO"},
+                    {"key": "update_seconds", "label": "Cały update"},
+                ],
+                "description": "Rozdziela koszt ładowania/stakowania przeciwników, self-play i PPO. Build GPU jest czasem hosta na przygotowanie/kopie; pierwsze użycie wag może dokończyć się asynchronicznie w collectorze.",
+            },
+            {
+                "id": "vram_chart",
+                "title": "VRAM — żywe tensory vs cache PyTorch",
+                "metrics": [
+                    {"key": "gpu_allocated_gb", "fallback": "gpu_memory_gb", "label": "Allocated"},
+                    {"key": "gpu_reserved_gb", "label": "Reserved"},
+                    {"key": "gpu_peak_allocated_gb", "fallback": "gpu_memory_gb", "label": "Peak allocated"},
+                    {"key": "gpu_peak_reserved_gb", "label": "Peak reserved"},
+                ],
+                "description": "Allocated = pamięć faktycznie zajęta przez żywe tensory. Reserved = allocated + wolne bloki zatrzymane przez caching allocator; tę drugą liczbę zwykle widzi system/NVIDIA.",
+            },
+            {
+                "id": "history_cache_chart",
+                "title": "Cache historycznych checkpointów w RAM",
+                "metrics": [
+                    {"key": "historical_ram_cache_models", "label": "Modele w RAM"},
+                    {"key": "historical_ram_cache_limit", "label": "Limit RAM", "smooth": False},
+                    {"key": "historical_ram_cache_hit_rate", "label": "Hit rate", "percent": True},
+                ],
+                "description": "LRU cache ogranicza ponowne torch.load z dysku. Po osiągnięciu limitu najdawniej używany model jest usuwany z RAM.",
+            },
+            {
                 "id": "history_pool_chart",
                 "title": "Historyczne stoły i modele w VRAM",
                 "metrics": [
@@ -272,6 +306,7 @@ class TrainingLogger:
         status_class = "warn" if ppo_stop else "ok"
         ppo_equiv = latest_float("ppo_epochs_equivalent")
         ppo_target = latest_float("ppo_epochs_target")
+        cache_cleared = latest_float("cuda_cache_cleared") >= 0.5
 
         cards = [
             ("Update", latest.get("update", "-"), ""),
@@ -286,6 +321,8 @@ class TrainingLogger:
             ("Target KL", f"{latest_float('target_kl'):.5f}", ""),
             ("History win rate", f"{latest_float('historical_win_rate') * 100:.2f}%", ""),
             ("History gry / update", int(latest_float("historical_games_this_update")), ""),
+            ("History RAM cache", f"{int(latest_float('historical_ram_cache_models'))} / {int(latest_float('historical_ram_cache_limit'))}", ""),
+            ("RAM cache hit", f"{latest_float('historical_ram_cache_hit_rate') * 100:.1f}%", ""),
             ("Partie / update", latest.get("games_this_update", "-"), ""),
             ("Śr. długość", f"{latest_float('mean_game_length'):.1f}", ""),
             ("Entropy", f"{latest_float('entropy'):.3f}", ""),
@@ -297,7 +334,12 @@ class TrainingLogger:
             ("Discard", f"{latest_float('discard_fraction') * 100:.1f}%", ""),
             ("Self-play", fmt_number(latest_float("selfplay_positions_per_second")) + " poz./s", ""),
             ("Cały trening", fmt_number(latest_float("positions_per_second")) + " poz./s", ""),
-            ("GPU", f"{latest_float('gpu_memory_gb'):.2f} GB", ""),
+            ("Collector", f"{latest_float('collector_seconds'):.2f} s", ""),
+            ("PPO", f"{latest_float('ppo_seconds'):.2f} s", ""),
+            ("VRAM allocated", f"{latest_float('gpu_allocated_gb', fallback='gpu_memory_gb'):.2f} GB", ""),
+            ("VRAM reserved", f"{latest_float('gpu_reserved_gb'):.2f} GB", ""),
+            ("VRAM peak", f"{latest_float('gpu_peak_allocated_gb', fallback='gpu_memory_gb'):.2f} GB", ""),
+            ("CUDA cache", "wyczyszczony" if cache_cleared else "normalny", "ok" if cache_cleared else ""),
         ]
         cards_html = "".join(
             "<div class='card " + html.escape(css_class) + "'><div class='card-label'>"
@@ -372,7 +414,7 @@ h1{{margin:0 0 6px;font-size:30px}}
       <option value='5000'>ostatnie 5000</option>
     </select>
   </div>
-  <div class='control-note'>Wygładzanie nie zmienia stałych limitów, np. target KL i grad limit.</div>
+  <div class='control-note'>Wygładzanie nie zmienia stałych limitów, np. target KL, hard KL i grad limit.</div>
 </div>
 <div class='cards'>{cards_html}</div>
 <div class='grid'>{''.join(chart_html)}</div>
