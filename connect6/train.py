@@ -210,7 +210,7 @@ def _historical_layout(
     if count:
         historical_mask[:count] = True
 
-    opponent_ids = torch.full(num_envs, -1, dtype=torch.int16, device=device)
+    opponent_ids = torch.full((num_envs,), -1, dtype=torch.int16, device=device)
     current_colors = torch.zeros(num_envs, dtype=torch.int8, device=device)
 
     if count:
