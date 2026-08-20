@@ -12,23 +12,22 @@ from torch.distributions import Categorical
 
 from .checkpoint import CheckpointManager, load_checkpoint
 from .config import load_config
-from .history import HistoricalModel, load_random_historical_models
+from .history import (
+    HistoricalPolicyEnsemble,
+    load_random_historical_checkpoints,
+)
 from .logger import TrainingLogger
 from .model import build_model, mask_logits
 from .utils import resolve_device, seed_everything
 from .vector_env import VectorConnect6, canonical_network_input
 
 
-UNKNOWN_EPISODE_RESULT = 2  # poprawne wyniki: -1, 0, +1
+UNKNOWN_EPISODE_RESULT = 2
 UNKNOWN_TERMINAL_MOVE = -1
 
 
 class CompleteGameBuffer:
-    """GPU buffer containing only decisions made by the current policy.
-
-    For current-v-current games every move is stored. For current-v-history games
-    moves made by frozen historical opponents are deliberately not stored.
-    """
+    """GPU buffer containing only decisions made by the current policy."""
 
     def __init__(
         self,
@@ -97,12 +96,6 @@ class CompleteGameBuffer:
         episode_terminal_moves: torch.Tensor,
         gamma: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns terminal samples and gamma-discounted terminal targets.
-
-        Gamma is applied per placed stone/action, not per full two-stone turn.
-        The terminal action itself has distance 0 and therefore multiplier 1.
-        """
-
         used_episode_ids = self.episode_ids[: self.count].long()
         winners = episode_results[used_episode_ids]
         complete_mask = winners.ne(UNKNOWN_EPISODE_RESULT)
@@ -126,8 +119,7 @@ class CompleteGameBuffer:
             torch.full_like(distance_after_action, float(gamma), dtype=torch.float32),
             distance_after_action,
         )
-        returns = actor_outcomes * discounts
-        return indices, returns
+        return indices, actor_outcomes * discounts
 
 
 def _autocast_context(device: torch.device, enabled: bool, dtype_name: str):
@@ -195,56 +187,108 @@ def _sample_actions(
     return actions, dist.log_prob(actions)
 
 
+def _model_count(models_or_count: Any) -> int:
+    if isinstance(models_or_count, int):
+        return max(0, models_or_count)
+    return len(models_or_count)
+
+
 def _historical_layout(
     num_envs: int,
     fraction: float,
-    historical_models: list[HistoricalModel],
+    historical_models: Any,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Create fixed historical tables plus per-game opponent/color assignment."""
+    """Fixed table->opponent assignment for one PPO update.
+
+    The percentage remains the user-facing control. Once the model pool is known,
+    historical tables are split as evenly as possible between models and each
+    table keeps the same opponent checkpoint until the next PPO update.
+    """
 
     fraction = min(1.0, max(0.0, float(fraction)))
-    count = int(round(num_envs * fraction)) if historical_models else 0
+    model_count = _model_count(historical_models)
+    count = int(round(num_envs * fraction)) if model_count else 0
+    if count and model_count > count:
+        model_count = count
 
     historical_mask = torch.zeros(num_envs, dtype=torch.bool, device=device)
-    if count:
-        historical_mask[:count] = True
-
     opponent_ids = torch.full((num_envs,), -1, dtype=torch.int16, device=device)
     current_colors = torch.zeros(num_envs, dtype=torch.int8, device=device)
 
-    if count:
-        idx = torch.arange(count, device=device)
-        opponent_ids[idx] = torch.randint(
-            0, len(historical_models), (count,), device=device, dtype=torch.int16
-        )
-        current_colors[idx] = torch.where(
-            torch.rand(count, device=device) < 0.5,
-            torch.ones(count, dtype=torch.int8, device=device),
-            -torch.ones(count, dtype=torch.int8, device=device),
-        )
+    if count == 0:
+        return historical_mask, opponent_ids, current_colors
+
+    historical_mask[:count] = True
+    base = count // model_count
+    remainder = count % model_count
+    counts = torch.full((model_count,), base, dtype=torch.long, device=device)
+    if remainder:
+        counts[:remainder] += 1
+
+    ids = torch.repeat_interleave(
+        torch.arange(model_count, dtype=torch.int16, device=device), counts
+    )
+    opponent_ids[:count] = ids
+
+    # Balanced start: each model gets as close as possible to 50/50 current color.
+    offset = 0
+    for model_id in range(model_count):
+        n = int(counts[model_id].item())
+        block = torch.ones(n, dtype=torch.int8, device=device)
+        block[n // 2 :] = -1
+        block = block[torch.randperm(n, device=device)]
+        current_colors[offset : offset + n] = block
+        offset += n
 
     return historical_mask, opponent_ids, current_colors
 
 
-def _reassign_historical_games(
-    indices: torch.Tensor,
+def _historical_table_matrix(
     opponent_ids: torch.Tensor,
+    model_count: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build [models, max_tables] table indices once per update.
+
+    Uneven final groups are padded with a valid table index. `valid` marks padding,
+    so the collector can retain the exact percentage requested in YAML.
+    """
+
+    if model_count <= 0:
+        empty = torch.empty((0, 0), dtype=torch.long, device=opponent_ids.device)
+        return empty, torch.empty((0, 0), dtype=torch.bool, device=opponent_ids.device)
+
+    groups = [
+        torch.nonzero(opponent_ids.eq(i), as_tuple=False).flatten()
+        for i in range(model_count)
+    ]
+    max_tables = max(int(group.numel()) for group in groups)
+    matrix = torch.empty(
+        (model_count, max_tables), dtype=torch.long, device=opponent_ids.device
+    )
+    valid = torch.zeros(
+        (model_count, max_tables), dtype=torch.bool, device=opponent_ids.device
+    )
+
+    for i, group in enumerate(groups):
+        n = int(group.numel())
+        matrix[i, :n] = group
+        valid[i, :n] = True
+        if n < max_tables:
+            matrix[i, n:] = group[0]
+
+    return matrix, valid
+
+
+def _reassign_historical_colors(
+    indices: torch.Tensor,
     current_colors: torch.Tensor,
-    historical_models: list[HistoricalModel],
 ) -> None:
-    if indices.numel() == 0 or not historical_models:
+    if indices.numel() == 0:
         return
-    device = indices.device
-    n = int(indices.numel())
-    opponent_ids[indices] = torch.randint(
-        0, len(historical_models), (n,), device=device, dtype=torch.int16
-    )
-    current_colors[indices] = torch.where(
-        torch.rand(n, device=device) < 0.5,
-        torch.ones(n, dtype=torch.int8, device=device),
-        -torch.ones(n, dtype=torch.int8, device=device),
-    )
+    # Flip color after every completed history game. This keeps each fixed table
+    # perfectly balanced over time without changing its assigned old checkpoint.
+    current_colors[indices] = -current_colors[indices]
 
 
 def train(config_path: str | Path) -> None:
@@ -302,10 +346,6 @@ def train(config_path: str | Path) -> None:
     scaler_enabled = use_amp and amp_dtype_name.lower() == "float16"
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
-    # -------------------------------------------------------------------------
-    # RESUME. Fresh runs start at update 1. Existing zero-based checkpoints are
-    # still compatible: checkpoint 4099 resumes as update 4100.
-    # -------------------------------------------------------------------------
     start_update = 1
     global_step = 0
     resume_mode = str(run_cfg.get("resume", "auto"))
@@ -322,20 +362,15 @@ def train(config_path: str | Path) -> None:
         checkpoint_version = int(checkpoint_model_cfg.get("architecture_version", 1))
         current_version = int(model_cfg.get("architecture_version", 3))
         if checkpoint_version != current_version:
-            raise RuntimeError(
-                f"Checkpoint {resume_path} używa innej architektury modelu."
-            )
+            raise RuntimeError(f"Checkpoint {resume_path} używa innej architektury modelu.")
 
         model.load_state_dict(payload["model_state"])
         optimizer.load_state_dict(payload["optimizer_state"])
         if payload.get("scaler_state") and scaler_enabled:
             scaler.load_state_dict(payload["scaler_state"])
-
         start_update = int(payload.get("update", 0)) + 1
         global_step = int(payload.get("global_step", 0))
-        print(
-            f"[resume] {resume_path} -> update {start_update}, global_step {global_step}"
-        )
+        print(f"[resume] {resume_path} -> update {start_update}, global_step {global_step}")
         del payload
 
     if bool(model_cfg.get("compile", False)):
@@ -358,6 +393,8 @@ def train(config_path: str | Path) -> None:
     max_grad_norm = float(tr.get("max_grad_norm", 1.0))
     ppo_epochs = int(tr.get("ppo_epochs", 4))
     target_kl = float(tr.get("target_kl", 0.03))
+    kl_window = max(1, int(tr.get("kl_window", 32)))
+    kl_hard_multiplier = max(1.0, float(tr.get("kl_hard_multiplier", 2.0)))
     normalize_adv = bool(tr.get("normalize_advantage", True))
     checkpoint_every = max(1, int(tr.get("checkpoint_every_updates", 25)))
     dashboard_every = max(1, int(tr.get("dashboard_every_updates", 5)))
@@ -371,24 +408,27 @@ def train(config_path: str | Path) -> None:
 
     games_total = 0
     historical_games_total = 0
-    historical_models: list[HistoricalModel] = []
+    historical_ensemble: HistoricalPolicyEnsemble | None = None
 
     print(f"[urządzenie] {device}")
     if device.type == "cuda":
-        print(
-            f"[gpu] {torch.cuda.get_device_name(device)} | CUDA runtime {torch.version.cuda}"
-        )
+        print(f"[gpu] {torch.cuda.get_device_name(device)} | CUDA runtime {torch.version.cuda}")
     print(
         f"[środowisko] {num_envs} parallel boards | terminal target >= "
         f"{completed_target:,} current-policy positions/update"
     )
     print(
         f"[history] fraction={historical_fraction:.3f} | "
-        f"models/update={historical_models_per_update}"
+        f"models/update={historical_models_per_update} | grouped GPU ensemble"
+    )
+    print(
+        f"[PPO] minibatch={minibatch_size:,} | target_kl={target_kl:.4f} | "
+        f"rolling_window={kl_window} | hard={kl_hard_multiplier:.1f}x"
     )
     print(f"[credit] gamma={gamma:.6f} per stone/action")
     print(
-        f"[model] parameters: {sum(p.numel() for p in getattr(model, '_orig_mod', model).parameters()):,}"
+        f"[model] parameters: "
+        f"{sum(p.numel() for p in getattr(model, '_orig_mod', model).parameters()):,}"
     )
     print(f"[run] {run_dir.resolve()}")
 
@@ -400,45 +440,55 @@ def train(config_path: str | Path) -> None:
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
-            # -----------------------------------------------------------------
-            # Choose a new frozen historical pool once per PPO update.
-            # Old pool references are dropped before new models are loaded.
-            # -----------------------------------------------------------------
-            historical_models = []
-            if device.type == "cuda":
-                # Frees tensors from the previous pool for reuse by the allocator.
-                torch.cuda.empty_cache()
+            # Drop the previous ensemble reference. Do NOT call empty_cache(): the
+            # CUDA caching allocator can reuse those blocks for the next pool.
+            historical_ensemble = None
 
-            if historical_fraction > 0.0 and historical_models_per_update > 0:
-                historical_models = load_random_historical_models(
+            requested_history_tables = int(round(num_envs * historical_fraction))
+            requested_models = min(
+                historical_models_per_update,
+                requested_history_tables,
+            )
+            historical_checkpoints = []
+            if requested_models > 0:
+                historical_checkpoints = load_random_historical_checkpoints(
                     checkpoint_mgr.dir,
                     current_update=update,
-                    requested_count=historical_models_per_update,
+                    requested_count=requested_models,
+                )
+            if historical_checkpoints:
+                historical_ensemble = HistoricalPolicyEnsemble(
+                    historical_checkpoints,
                     device=device,
                 )
 
+            historical_model_count = (
+                historical_ensemble.num_models if historical_ensemble is not None else 0
+            )
             historical_mask, historical_opponent_ids, historical_current_colors = (
                 _historical_layout(
                     num_envs,
                     historical_fraction,
-                    historical_models,
+                    historical_model_count,
                     device,
                 )
             )
-            historical_idx = torch.nonzero(
-                historical_mask, as_tuple=False
-            ).flatten()
-
-            # A history table must not silently switch old opponent in the middle
-            # of a game when a new pool is sampled. Reset only those tables.
+            history_table_matrix, history_table_valid = _historical_table_matrix(
+                historical_opponent_ids,
+                historical_model_count,
+            )
+            historical_idx = torch.nonzero(historical_mask, as_tuple=False).flatten()
             if historical_idx.numel():
                 env.reset(historical_idx)
 
             history_tables = int(historical_idx.numel())
-            if historical_models:
+            if historical_ensemble is not None:
+                tables_per_model = history_table_valid.sum(dim=1)
                 print(
-                    f"[history] u={update:06d} loaded={len(historical_models)} "
-                    f"tables={history_tables}"
+                    f"[history] u={update:06d} loaded={historical_model_count} "
+                    f"tables={history_tables} per_model="
+                    f"{int(tables_per_model.min().item())}-"
+                    f"{int(tables_per_model.max().item())}"
                 )
 
             buffer.reset()
@@ -483,8 +533,6 @@ def train(config_path: str | Path) -> None:
                     network_input = env.network_input()
                     legal = env.legal_mask()
 
-                    # Current policy owns all ordinary self-play moves and only
-                    # its assigned color on historical tables.
                     current_actor_mask = ~historical_mask
                     if history_tables:
                         current_actor_mask = current_actor_mask | (
@@ -494,22 +542,16 @@ def train(config_path: str | Path) -> None:
 
                     actions = torch.empty(num_envs, dtype=torch.long, device=device)
 
-                    current_idx = torch.nonzero(
-                        current_actor_mask, as_tuple=False
-                    ).flatten()
+                    current_idx = torch.nonzero(current_actor_mask, as_tuple=False).flatten()
                     if current_idx.numel():
                         with _autocast_context(device, use_amp, amp_dtype_name):
-                            current_logits, current_values = model(
-                                network_input[current_idx]
-                            )
+                            current_logits, current_values = model(network_input[current_idx])
                         current_actions, current_logprobs = _sample_actions(
                             current_logits,
                             legal[current_idx],
                             temperature,
                         )
                         actions[current_idx] = current_actions
-
-                        # Store ONLY actions from the trainable current policy.
                         buffer.append_batch(
                             boards=env.boards[current_idx],
                             players=env.current_player[current_idx],
@@ -522,28 +564,33 @@ def train(config_path: str | Path) -> None:
                         )
                         current_segment_lengths[current_idx] += 1
 
-                    # Frozen historical policies only act on their own assigned
-                    # history tables. Their states/actions/logprobs never enter PPO.
-                    for historical_id, historical in enumerate(historical_models):
-                        old_actor_mask = (
-                            historical_mask
-                            & ~current_actor_mask
-                            & historical_opponent_ids.eq(historical_id)
-                        )
-                        old_idx = torch.nonzero(
-                            old_actor_mask, as_tuple=False
-                        ).flatten()
-                        if old_idx.numel() == 0:
-                            continue
-
+                    # One fixed-shape grouped history forward for ALL history tables.
+                    # This intentionally performs some extra FLOPs on current-owned
+                    # history turns because one large BMM is much cheaper than many
+                    # tiny per-checkpoint forwards on an RTX GPU.
+                    if historical_ensemble is not None and history_tables:
+                        grouped_input = network_input[history_table_matrix]
                         with _autocast_context(device, use_amp, amp_dtype_name):
-                            old_logits, _ = historical.model(network_input[old_idx])
-                        old_actions, _ = _sample_actions(
-                            old_logits,
-                            legal[old_idx],
-                            temperature,
+                            grouped_logits = historical_ensemble.forward_grouped(grouped_input)
+
+                        grouped_players = env.current_player[history_table_matrix]
+                        grouped_current_colors = historical_current_colors[
+                            history_table_matrix
+                        ]
+                        old_turn = (
+                            history_table_valid
+                            & grouped_players.ne(grouped_current_colors)
                         )
-                        actions[old_idx] = old_actions
+
+                        if old_turn.any():
+                            old_tables = history_table_matrix[old_turn]
+                            old_logits = grouped_logits[old_turn]
+                            old_actions, _ = _sample_actions(
+                                old_logits,
+                                legal[old_tables],
+                                temperature,
+                            )
+                            actions[old_tables] = old_actions
 
                     step = env.step(actions)
                     done_idx = torch.nonzero(step.done, as_tuple=False).flatten()
@@ -566,8 +613,7 @@ def train(config_path: str | Path) -> None:
                         update_draws += int(winners.eq(0).sum().item())
                         game_lengths.extend(full_game_lengths.float().cpu().tolist())
 
-                        done_hist_mask = historical_mask[done_idx]
-                        hist_done_idx = done_idx[done_hist_mask]
+                        hist_done_idx = done_idx[historical_mask[done_idx]]
                         if hist_done_idx.numel():
                             hist_winners = step.winner[hist_done_idx]
                             hist_current_colors = historical_current_colors[hist_done_idx]
@@ -593,20 +639,17 @@ def train(config_path: str | Path) -> None:
                         current_episode_ids[done_idx] = new_ids
                         next_episode_id += count_done
 
-                        # New history game: fresh old opponent and current color.
-                        _reassign_historical_games(
+                        # Opponent stays fixed to its table for the whole update;
+                        # only current color flips for the next game.
+                        _reassign_historical_colors(
                             hist_done_idx,
-                            historical_opponent_ids,
                             historical_current_colors,
-                            historical_models,
                         )
 
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
 
-            collection_elapsed = max(
-                1e-9, time.perf_counter() - collection_started
-            )
+            collection_elapsed = max(1e-9, time.perf_counter() - collection_started)
 
             completed_idx, returns = buffer.completed_samples(
                 episode_results,
@@ -635,7 +678,7 @@ def train(config_path: str | Path) -> None:
                 )
 
             # -----------------------------------------------------------------
-            # PPO
+            # PPO with KL watchdog BEFORE backward / optimizer.step.
             # -----------------------------------------------------------------
             model.train()
             losses: list[float] = []
@@ -647,13 +690,16 @@ def train(config_path: str | Path) -> None:
             grad_norms: list[float] = []
             grad_clip_scales: list[float] = []
             grad_was_clipped: list[float] = []
-            stop_for_kl = False
 
+            stop_for_kl = False
+            kl_stop_kind = "none"
             minibatches_per_epoch = max(1, math.ceil(train_size / minibatch_size))
             planned_ppo_minibatches = ppo_epochs * minibatches_per_epoch
+            checked_ppo_minibatches = 0
             completed_ppo_minibatches = 0
             ppo_stop_epoch = 0
             ppo_stop_minibatch = 0
+            kl_rolling_last = 0.0
 
             for _epoch in range(ppo_epochs):
                 order = torch.randperm(train_size, device=device)
@@ -665,9 +711,7 @@ def train(config_path: str | Path) -> None:
                     mb_players = buffer.players[idx]
                     mb_stones = buffer.stones_left[idx]
                     mb_actions = buffer.actions[idx].long()
-                    mb_input = canonical_network_input(
-                        mb_boards, mb_players, mb_stones
-                    )
+                    mb_input = canonical_network_input(mb_boards, mb_players, mb_stones)
                     mb_legal = mb_boards.reshape(mb_boards.shape[0], -1).eq(0)
 
                     with _autocast_context(device, use_amp, amp_dtype_name):
@@ -699,6 +743,36 @@ def train(config_path: str | Path) -> None:
                             - entropy_coef * entropy
                         )
 
+                    with torch.no_grad():
+                        approx_kl = (((ratio - 1.0) - logratio).mean().item())
+                        clipfrac = (
+                            ((ratio - 1.0).abs() > clip_coef)
+                            .float()
+                            .mean()
+                            .item()
+                        )
+
+                    checked_ppo_minibatches += 1
+                    kls.append(float(approx_kl))
+                    clipfracs.append(float(clipfrac))
+                    kl_rolling_last = _mean(kls[-kl_window:])
+
+                    hard_limit = target_kl * kl_hard_multiplier
+                    hard_stop = target_kl > 0 and approx_kl > hard_limit
+                    soft_stop = (
+                        target_kl > 0
+                        and len(kls) >= kl_window
+                        and kl_rolling_last > target_kl
+                    )
+                    if hard_stop or soft_stop:
+                        stop_for_kl = True
+                        kl_stop_kind = "hard" if hard_stop else "rolling"
+                        ppo_stop_epoch = _epoch + 1
+                        ppo_stop_minibatch = (start // minibatch_size) + 1
+                        # IMPORTANT: rejected minibatch is NOT applied.
+                        optimizer.zero_grad(set_to_none=True)
+                        break
+
                     optimizer.zero_grad(set_to_none=True)
                     if scaler_enabled:
                         scaler.scale(loss).backward()
@@ -710,14 +784,10 @@ def train(config_path: str | Path) -> None:
                         model.parameters(), max_grad_norm, error_if_nonfinite=True
                     )
                     grad_norm = float(grad_norm_tensor.detach().item())
-                    grad_scale = min(
-                        1.0, max_grad_norm / (grad_norm + 1e-6)
-                    )
+                    grad_scale = min(1.0, max_grad_norm / (grad_norm + 1e-6))
                     grad_norms.append(grad_norm)
                     grad_clip_scales.append(grad_scale)
-                    grad_was_clipped.append(
-                        1.0 if grad_norm > max_grad_norm else 0.0
-                    )
+                    grad_was_clipped.append(1.0 if grad_norm > max_grad_norm else 0.0)
 
                     if scaler_enabled:
                         scaler.step(optimizer)
@@ -725,28 +795,12 @@ def train(config_path: str | Path) -> None:
                     else:
                         optimizer.step()
 
-                    with torch.no_grad():
-                        approx_kl = (((ratio - 1.0) - logratio).mean().item())
-                        clipfrac = (
-                            ((ratio - 1.0).abs() > clip_coef)
-                            .float()
-                            .mean()
-                            .item()
-                        )
-
                     losses.append(float(loss.item()))
                     policy_losses.append(float(policy_loss.item()))
                     value_losses.append(float(value_loss.item()))
                     entropies.append(float(entropy.item()))
-                    kls.append(float(approx_kl))
-                    clipfracs.append(float(clipfrac))
                     completed_ppo_minibatches += 1
 
-                    if target_kl > 0 and approx_kl > target_kl:
-                        stop_for_kl = True
-                        ppo_stop_epoch = _epoch + 1
-                        ppo_stop_minibatch = (start // minibatch_size) + 1
-                        break
                 if stop_for_kl:
                     break
 
@@ -757,9 +811,6 @@ def train(config_path: str | Path) -> None:
                 1, minibatches_per_epoch
             )
 
-            # -----------------------------------------------------------------
-            # Metrics
-            # -----------------------------------------------------------------
             global_step += train_size
             games_total += update_games
             historical_games_total += update_hist_games
@@ -779,10 +830,16 @@ def train(config_path: str | Path) -> None:
                 "approx_kl_p95": _percentile(kls, 0.95),
                 "approx_kl_max": max(kls) if kls else 0.0,
                 "approx_kl_last": kls[-1] if kls else 0.0,
+                "approx_kl_rolling_last": kl_rolling_last,
                 "target_kl": target_kl,
+                "kl_window": kl_window,
+                "kl_hard_limit": target_kl * kl_hard_multiplier,
                 "ppo_early_stop": 1.0 if stop_for_kl else 0.0,
+                "ppo_kl_hard_stop": 1.0 if kl_stop_kind == "hard" else 0.0,
+                "ppo_kl_rolling_stop": 1.0 if kl_stop_kind == "rolling" else 0.0,
                 "ppo_epochs_target": ppo_epochs,
                 "ppo_epochs_equivalent": ppo_epochs_equivalent,
+                "ppo_minibatches_checked": checked_ppo_minibatches,
                 "ppo_minibatches_completed": completed_ppo_minibatches,
                 "ppo_minibatches_possible": planned_ppo_minibatches,
                 "ppo_completion_fraction": ppo_completion_fraction,
@@ -806,7 +863,15 @@ def train(config_path: str | Path) -> None:
                 "mean_game_length": _mean(game_lengths),
                 "historical_fraction": historical_fraction,
                 "historical_tables": history_tables,
-                "historical_models_loaded": len(historical_models),
+                "historical_models_loaded": historical_model_count,
+                "historical_tables_per_model_min": (
+                    int(history_table_valid.sum(dim=1).min().item())
+                    if historical_model_count else 0
+                ),
+                "historical_tables_per_model_max": (
+                    int(history_table_valid.sum(dim=1).max().item())
+                    if historical_model_count else 0
+                ),
                 "historical_games_completed": historical_games_total,
                 "historical_games_this_update": update_hist_games,
                 "historical_wins": update_hist_wins,
@@ -820,10 +885,8 @@ def train(config_path: str | Path) -> None:
                 "generated_positions_this_update": generated_positions,
                 "discarded_positions_this_update": discarded_positions,
                 "unfinished_games_discarded": unfinished_games_discarded,
-                "discard_fraction": discarded_positions
-                / max(1, generated_positions),
-                "selfplay_positions_per_second": generated_positions
-                / collection_elapsed,
+                "discard_fraction": discarded_positions / max(1, generated_positions),
+                "selfplay_positions_per_second": generated_positions / collection_elapsed,
                 "positions_per_second": train_size / elapsed,
                 "gpu_memory_gb": (
                     torch.cuda.max_memory_allocated(device) / 1e9
@@ -832,30 +895,26 @@ def train(config_path: str | Path) -> None:
                 ),
             }
 
-            logger.log(
-                metrics,
-                write_dashboard=(update % dashboard_every == 0),
-            )
+            logger.log(metrics, write_dashboard=(update % dashboard_every == 0))
 
             print(
                 f"u={update:06d} step={global_step:,} "
                 f"loss={metrics['loss']:.4f} ent={metrics['entropy']:.3f} "
                 f"KL={metrics['approx_kl_mean']:.4f}/"
-                f"{metrics['approx_kl_max']:.4f} target={target_kl:.4f} "
+                f"{metrics['approx_kl_max']:.4f} roll={kl_rolling_last:.4f} "
                 f"PPO={metrics['ppo_completion_fraction']:.0%}"
-                f"{' EARLY-STOP' if stop_for_kl else ''} "
+                f"{' ' + kl_stop_kind.upper() + '-STOP' if stop_for_kl else ''} "
                 f"games={update_games:4d} complete={train_size:,} "
                 f"discard={discarded_positions:,} "
                 f"B/W/D={metrics['black_win_rate']:.2f}/"
                 f"{metrics['white_win_rate']:.2f}/{metrics['draw_rate']:.2f} "
                 f"histWR={metrics['historical_win_rate']:.1%} "
-                f"grad={metrics['grad_norm_mean']:.2f} "
-                f"p95={metrics['grad_norm_p95']:.2f} "
+                f"hist={historical_model_count}x"
+                f"{metrics['historical_tables_per_model_min']} "
                 f"selfplay={metrics['selfplay_positions_per_second']:,.0f} pos/s "
                 f"total={metrics['positions_per_second']:,.0f} train-pos/s"
             )
 
-            # With one-based update numbering, every 10 means 10,20,30,...
             if update % checkpoint_every == 0:
                 path = checkpoint_mgr.save(
                     update=update,
@@ -882,9 +941,7 @@ def train(config_path: str | Path) -> None:
 
     except KeyboardInterrupt:
         print("\n[przerwano] Zapisywanie najnowszego checkpointu...")
-        interrupted_update = (
-            update if "update" in locals() else max(1, start_update)
-        )
+        interrupted_update = update if "update" in locals() else max(1, start_update)
         checkpoint_mgr.save(
             update=interrupted_update,
             model=model,
@@ -923,7 +980,7 @@ def _transform_board_actions(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Connect6 PPO: self-play + frozen historical opponents"
+        description="Connect6 PPO: self-play + grouped frozen historical opponents"
     )
     parser.add_argument("--config", default="configs/train.yaml")
     args = parser.parse_args()
