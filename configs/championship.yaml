@@ -20,7 +20,7 @@ championship:
   # - wagowo w VRAM podczas rundy jest około tables + 1 modeli.
   #
   # Zwiększaj: 4 -> 8 -> 16 -> 32 i obserwuj szybkość oraz VRAM.
-  tables: 2048
+  tables: 256
 
   # Liczba partii składających się na JEDEN pojedynek dwóch modeli.
   # Musi być parzysta.
