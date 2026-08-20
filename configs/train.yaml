@@ -70,7 +70,7 @@ training:
 
   # Ta wartość oznacza liczbę minibatchy terminalnych pozycji na update.
   # Faktyczny cel pozycji = completed_positions_per_update * minibatch_size.
-  completed_positions_per_update: 512
+  completed_positions_per_update: 1024
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 100000
