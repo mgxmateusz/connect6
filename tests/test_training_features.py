@@ -3,8 +3,14 @@ from pathlib import Path
 import pytest
 import torch
 
-from connect6.history import HistoricalModel
-from connect6.train import CompleteGameBuffer, _historical_layout, _temperature
+from connect6.history import HistoricalCheckpoint, HistoricalPolicyEnsemble
+from connect6.model import build_model
+from connect6.train import (
+    CompleteGameBuffer,
+    _historical_layout,
+    _historical_table_matrix,
+    _temperature,
+)
 
 
 def test_gamma_discount_is_per_stone_and_terminal_action_has_distance_zero():
@@ -46,8 +52,6 @@ def test_gamma_discount_is_per_stone_and_terminal_action_has_distance_zero():
     )
 
     assert indices.tolist() == [0, 1]
-    # Sample 0: action at move_count 0, terminal move_count 4 -> 3 later actions.
-    # Sample 1: action at move_count 2, terminal move_count 4 -> 1 later action.
     assert returns.tolist() == pytest.approx([0.5**3, 0.5])
 
 
@@ -61,21 +65,64 @@ def test_temperature_uses_one_based_update_numbers():
     assert _temperature(11, cfg) == pytest.approx(0.5)
 
 
-def test_historical_fraction_and_colors():
-    models = [
-        HistoricalModel(Path("model_update_00000010.pt"), 10, torch.nn.Identity()),
-        HistoricalModel(Path("model_update_00000020.pt"), 20, torch.nn.Identity()),
-    ]
-
+def test_historical_fraction_is_split_evenly_and_fixed_per_model():
     mask, opponent_ids, colors = _historical_layout(
-        num_envs=16,
-        fraction=0.125,
-        historical_models=models,
+        num_envs=100,
+        fraction=0.25,
+        historical_models=4,
         device=torch.device("cpu"),
     )
 
-    assert int(mask.sum().item()) == 2
-    assert torch.all(opponent_ids[mask] >= 0)
-    assert torch.all(opponent_ids[mask] < 2)
-    assert set(colors[mask].tolist()).issubset({-1, 1})
+    assert int(mask.sum().item()) == 25
+    counts = [int(opponent_ids.eq(i).sum().item()) for i in range(4)]
+    assert max(counts) - min(counts) <= 1
+    assert sum(counts) == 25
     assert torch.all(opponent_ids[~mask] == -1)
+    assert set(colors[mask].tolist()).issubset({-1, 1})
+
+    table_matrix, valid = _historical_table_matrix(opponent_ids, 4)
+    assert int(valid.sum().item()) == 25
+    assert table_matrix.shape[0] == 4
+    for model_id in range(4):
+        tables = table_matrix[model_id][valid[model_id]]
+        assert torch.all(opponent_ids[tables] == model_id)
+
+
+def test_grouped_history_ensemble_matches_individual_models_on_cpu():
+    torch.manual_seed(123)
+    board_size = 3
+    model_cfg = {
+        "architecture_version": 3,
+        "layers": [
+            {"neurons": 12, "norm": "layer", "activation": "silu", "dropout": 0.0},
+            {"neurons": 8, "norm": "none", "activation": "silu", "dropout": 0.0},
+        ],
+        "policy_layers": [],
+        "value_layers": [
+            {"neurons": 4, "norm": "none", "activation": "silu", "dropout": 0.0},
+        ],
+        "compile": False,
+        "compile_mode": "default",
+    }
+    game_cfg = {"board_size": board_size, "win_length": 3}
+
+    models = [build_model(model_cfg, board_size) for _ in range(2)]
+    checkpoints = [
+        HistoricalCheckpoint(
+            path=Path(f"model_update_{i + 1:08d}.pt"),
+            update=i + 1,
+            model_state=model.state_dict(),
+            model_config=model_cfg,
+            game_config=game_cfg,
+        )
+        for i, model in enumerate(models)
+    ]
+
+    ensemble = HistoricalPolicyEnsemble(checkpoints, torch.device("cpu"))
+    x = torch.randn(2, 5, board_size * board_size * 2 + 2)
+    grouped = ensemble.forward_grouped(x)
+
+    for i, model in enumerate(models):
+        model.eval()
+        expected, _ = model(x[i])
+        assert torch.allclose(grouped[i], expected, atol=1e-5, rtol=1e-5)

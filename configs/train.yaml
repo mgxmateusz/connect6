@@ -68,8 +68,8 @@ training:
   # Liczba plansz rozgrywanych równolegle.
   num_envs: 16384
 
-  # Ta wartość oznacza liczbę minibatchy terminalnych pozycji na update.
-  # Faktyczny cel pozycji = completed_positions_per_update * minibatch_size.
+  # Faktyczny cel PPO = completed_positions_per_update * minibatch_size.
+  # 512 * 8192 = 4 194 304 terminalnych pozycji current-policy / update.
   completed_positions_per_update: 512
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
@@ -79,7 +79,10 @@ training:
   # PPO / CREDIT ASSIGNMENT
   # --------------------------------------------------------------------------
   ppo_epochs: 2
+
+  # Duży minibatch lepiej wykorzystuje GPU i zmniejsza szum pojedynczego KL.
   minibatch_size: 8192
+
   learning_rate: 0.0003
   lr_schedule: "cosine"     # constant | cosine
   weight_decay: 0.0001
@@ -88,7 +91,14 @@ training:
   value_coef: 0.50
   entropy_coef: 0.0125
   max_grad_norm: 1.0
+
+  # target_kl jest teraz SOFT limitem średniej kroczącej, a nie limitem jednego
+  # przypadkowego minibatcha. Hard-stop chroni przed prawdziwym odjazdem.
+  # Minibatch powodujący stop NIE wykonuje optimizer.step().
   target_kl: 0.03
+  kl_window: 32
+  kl_hard_multiplier: 2.0   # hard limit = 0.06 przy target_kl=0.03
+
   normalize_advantage: true
 
   # Terminalny wynik jest cofany o gamma za każdy kamień/akcję pomiędzy
@@ -100,16 +110,19 @@ training:
   # --------------------------------------------------------------------------
   # HISTORYCZNY SELF-PLAY / ANTI-FORGETTING
   # --------------------------------------------------------------------------
-  # Jaka część stołów gra current-vs-history. 0.125 = dokładnie 1/8.
+  # Nadal sterujemy PROCENTEM wszystkich stołów. 0.125 = dokładnie 1/8.
   historical_fraction: 0.125
 
-  # Ile losowych checkpointów historycznych próbujemy trzymać równocześnie
-  # w VRAM podczas jednego update'u. Jeśli dostępnych jest mniej, bierzemy tyle,
-  # ile istnieje. Nowy zestaw jest losowany przed każdym update'em PPO.
-  historical_models_per_update: 16
+  # Osobno wybieramy ile różnych checkpointów losować na update.
+  # Po wylosowaniu historyczne stoły są rozdzielane między modele możliwie równo
+  # i dane przypisanie stół -> model pozostaje stałe do końca update'u.
+  # Przy 16384 env i 12.5% history: 2048 stołów / 32 modele = 64 stoły/model.
+  historical_models_per_update: 32
 
-  # Historyczny model jest tylko przeciwnikiem. Jego ruchy NIGDY nie trafiają
-  # do bufora PPO. Current gra w historycznych partiach losowo czarnymi/białymi.
+  # Wszystkie historyczne modele są liczone jednym grouped batched MLP na GPU.
+  # Nie ma już pętli małych forwardów model-po-modelu. History ensemble liczy
+  # tylko policy, bez niepotrzebnego value head. Ruchy historii NIGDY nie trafiają
+  # do PPO.
 
   # --------------------------------------------------------------------------
   # EKSPLORACJA PODCZAS SELF-PLAY
