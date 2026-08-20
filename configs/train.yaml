@@ -111,13 +111,13 @@ training:
   # HISTORYCZNY SELF-PLAY / ANTI-FORGETTING
   # --------------------------------------------------------------------------
   # Nadal sterujemy PROCENTEM wszystkich stołów. 0.125 = dokładnie 1/8.
-  historical_fraction: 0.125
+  historical_fraction: 0.25
 
   # Osobno wybieramy ile różnych checkpointów losować na update.
   # Po wylosowaniu historyczne stoły są rozdzielane między modele możliwie równo
   # i dane przypisanie stół -> model pozostaje stałe do końca update'u.
   # Przy 16384 env i 12.5% history: 2048 stołów / 32 modele = 64 stoły/model.
-  historical_models_per_update: 32
+  historical_models_per_update: 64
 
   # Ograniczony LRU cache w zwykłym RAM. Dla obecnego MLP 256 pełnych state_dict
   # to około 4-5 GB RAM. Po zapełnieniu najdawniej używane modele są wyrzucane.
