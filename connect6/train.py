@@ -649,6 +649,12 @@ def train(config_path: str | Path) -> None:
             grad_was_clipped: list[float] = []
             stop_for_kl = False
 
+            minibatches_per_epoch = max(1, math.ceil(train_size / minibatch_size))
+            planned_ppo_minibatches = ppo_epochs * minibatches_per_epoch
+            completed_ppo_minibatches = 0
+            ppo_stop_epoch = 0
+            ppo_stop_minibatch = 0
+
             for _epoch in range(ppo_epochs):
                 order = torch.randperm(train_size, device=device)
                 for start in range(0, train_size, minibatch_size):
@@ -734,12 +740,22 @@ def train(config_path: str | Path) -> None:
                     entropies.append(float(entropy.item()))
                     kls.append(float(approx_kl))
                     clipfracs.append(float(clipfrac))
+                    completed_ppo_minibatches += 1
 
                     if target_kl > 0 and approx_kl > target_kl:
                         stop_for_kl = True
+                        ppo_stop_epoch = _epoch + 1
+                        ppo_stop_minibatch = (start // minibatch_size) + 1
                         break
                 if stop_for_kl:
                     break
+
+            ppo_completion_fraction = completed_ppo_minibatches / max(
+                1, planned_ppo_minibatches
+            )
+            ppo_epochs_equivalent = completed_ppo_minibatches / max(
+                1, minibatches_per_epoch
+            )
 
             # -----------------------------------------------------------------
             # Metrics
@@ -759,6 +775,19 @@ def train(config_path: str | Path) -> None:
                 "value_loss": _mean(value_losses),
                 "entropy": _mean(entropies),
                 "approx_kl": _mean(kls),
+                "approx_kl_mean": _mean(kls),
+                "approx_kl_p95": _percentile(kls, 0.95),
+                "approx_kl_max": max(kls) if kls else 0.0,
+                "approx_kl_last": kls[-1] if kls else 0.0,
+                "target_kl": target_kl,
+                "ppo_early_stop": 1.0 if stop_for_kl else 0.0,
+                "ppo_epochs_target": ppo_epochs,
+                "ppo_epochs_equivalent": ppo_epochs_equivalent,
+                "ppo_minibatches_completed": completed_ppo_minibatches,
+                "ppo_minibatches_possible": planned_ppo_minibatches,
+                "ppo_completion_fraction": ppo_completion_fraction,
+                "ppo_stop_epoch": ppo_stop_epoch,
+                "ppo_stop_minibatch": ppo_stop_minibatch,
                 "clip_fraction": _mean(clipfracs),
                 "grad_norm_mean": _mean(grad_norms),
                 "grad_norm_p95": _percentile(grad_norms, 0.95),
@@ -811,12 +840,15 @@ def train(config_path: str | Path) -> None:
             print(
                 f"u={update:06d} step={global_step:,} "
                 f"loss={metrics['loss']:.4f} ent={metrics['entropy']:.3f} "
+                f"KL={metrics['approx_kl_mean']:.4f}/"
+                f"{metrics['approx_kl_max']:.4f} target={target_kl:.4f} "
+                f"PPO={metrics['ppo_completion_fraction']:.0%}"
+                f"{' EARLY-STOP' if stop_for_kl else ''} "
                 f"games={update_games:4d} complete={train_size:,} "
                 f"discard={discarded_positions:,} "
                 f"B/W/D={metrics['black_win_rate']:.2f}/"
                 f"{metrics['white_win_rate']:.2f}/{metrics['draw_rate']:.2f} "
-                f"hist={update_hist_wins}/{update_hist_losses}/{update_hist_draws} "
-                f"({metrics['historical_win_rate']:.1%}) "
+                f"histWR={metrics['historical_win_rate']:.1%} "
                 f"grad={metrics['grad_norm_mean']:.2f} "
                 f"p95={metrics['grad_norm_p95']:.2f} "
                 f"selfplay={metrics['selfplay_positions_per_second']:,.0f} pos/s "
