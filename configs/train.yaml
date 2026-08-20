@@ -66,11 +66,11 @@ training:
   device: "cuda"
 
   # Liczba plansz rozgrywanych równolegle.
-  num_envs: 16384
+  num_envs: 8192
 
   # Faktyczny cel PPO = completed_positions_per_update * minibatch_size.
   # 512 * 8192 = 4 194 304 terminalnych pozycji current-policy / update.
-  completed_positions_per_update: 512
+  completed_positions_per_update: 384
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 10000000
@@ -78,7 +78,7 @@ training:
   # --------------------------------------------------------------------------
   # PPO / CREDIT ASSIGNMENT
   # --------------------------------------------------------------------------
-  ppo_epochs: 2
+  ppo_epochs: 3
 
   # Duży minibatch lepiej wykorzystuje GPU i zmniejsza szum pojedynczego KL.
   minibatch_size: 8192
@@ -117,11 +117,11 @@ training:
   # Po wylosowaniu historyczne stoły są rozdzielane między modele możliwie równo
   # i dane przypisanie stół -> model pozostaje stałe do końca update'u.
   # Przy 16384 env i 12.5% history: 2048 stołów / 32 modele = 64 stoły/model.
-  historical_models_per_update: 64
+  historical_models_per_update: 128
 
   # Ograniczony LRU cache w zwykłym RAM. Dla obecnego MLP 256 pełnych state_dict
   # to około 4-5 GB RAM. Po zapełnieniu najdawniej używane modele są wyrzucane.
-  historical_ram_cache_models: 256
+  historical_ram_cache_models: 384
 
   # Zamrożeni przeciwnicy nie potrzebują FP32. To dotyczy WYŁĄCZNIE inference
   # historycznych modeli; uczony current model i jego LayerNormy nie są zmieniane.

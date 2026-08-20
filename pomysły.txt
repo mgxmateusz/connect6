@@ -1,0 +1,11 @@
+zmienić na trening nocny:
+
+zmienić gamme na 0.99 [22 kroki wcześniej dostaje w tedy 80% nagrody a nie 90%]
+
+save co 10 
+liczba modeli naraz 64 dla historycznych
+dla ramu ustawić limit bufora na 512 modeli (powinno starczyć na długo)
+zmienić batch size na 16384
+wielkość bufora z 384 -> 256 (zwiększyliśmy minibatcha 2 krotnie więc musimy zmniejszyć mnożnik bufora)
+ilość epok zmienić na 4
+zostawić liczbe stołów na poziomie 8192
