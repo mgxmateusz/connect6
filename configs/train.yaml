@@ -26,27 +26,27 @@ model:
   #     1 = stones_left / 2
   #     1 = is_black
   layers:
-    - neurons: 512
+    - neurons: 1024
       norm: layer
       activation: silu
       dropout: 0.0
 
-    - neurons: 512
+    - neurons: 1024
       norm: none
       activation: silu
       dropout: 0.0
 
-    - neurons: 256
+    - neurons: 1024
       norm: layer
       activation: silu
       dropout: 0.0
 
-    - neurons: 256
+    - neurons: 768
       norm: layer
       activation: silu
       dropout: 0.0
 
-    - neurons: 128
+    - neurons: 512
       norm: none
       activation: silu
       dropout: 0.0
@@ -70,7 +70,7 @@ training:
 
   # Ta wartość oznacza liczbę minibatchy terminalnych pozycji na update.
   # Faktyczny cel pozycji = completed_positions_per_update * minibatch_size.
-  completed_positions_per_update: 1024
+  completed_positions_per_update: 768
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 100000
@@ -86,7 +86,7 @@ training:
   adam_eps: 0.00001
   clip_coef: 0.2
   value_coef: 0.50
-  entropy_coef: 0.015
+  entropy_coef: 0.0125
   max_grad_norm: 1.0
   target_kl: 0.03
   normalize_advantage: true
@@ -106,7 +106,7 @@ training:
   # Ile losowych checkpointów historycznych próbujemy trzymać równocześnie
   # w VRAM podczas jednego update'u. Jeśli dostępnych jest mniej, bierzemy tyle,
   # ile istnieje. Nowy zestaw jest losowany przed każdym update'em PPO.
-  historical_models_per_update: 8
+  historical_models_per_update: 16
 
   # Historyczny model jest tylko przeciwnikiem. Jego ruchy NIGDY nie trafiają
   # do bufora PPO. Current gra w historycznych partiach losowo czarnymi/białymi.
