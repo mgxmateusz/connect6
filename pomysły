@@ -1,2 +1,3 @@
 przemyśleć zwiększenie do 25% stołów z poprzednimi wersjami, przy 32 wersjach aktualne 2048 stołów daje 64 gry per model. Powiększenie tego do 1/4 da nam 128 gier per model dodatkowo wzmocni nam efekt systemu antyzapominania oraz pomoże walczyć z nagłymi skokami złych strategi, działającymi tylko na aktualną wersję samej siebie. 
 
+zobaczyć ile tych modeli wejdzie na raz, nie zwalnia to treningu samo w sobie ale zajmuje troche v ramu.
