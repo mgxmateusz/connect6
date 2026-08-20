@@ -3,7 +3,6 @@
 # =============================================================================
 
 run:
-  # Nowa nazwa, ponieważ checkpointy ze starego CNN nie są zgodne z tym MLP.
   name: "connect6_mlp_01"
   root_dir: "runs"
   seed: 42
@@ -21,29 +20,11 @@ game:
 model:
   architecture_version: 3
 
-  # ==========================================================================
-  # ARCHITEKTURA JEDNEGO ZWYKŁEGO MLP
-  # ==========================================================================
   # Dla planszy 19x19 wejście ma 724 wartości:
   #   361 = moje kamienie
   #   361 = kamienie przeciwnika
   #     1 = stones_left / 2
   #     1 = is_black
-  #
-  # Czyli model dostaje jeden zwykły wektor:
-  #   724 -> ...
-  #
-  # Każdą warstwę ustawiasz osobno:
-  #   neurons    = liczba neuronów
-  #   norm       = none | layer | batch
-  #   activation = silu | gelu | relu | tanh | sigmoid | none
-  #   dropout    = 0.0 ... <1.0
-  #
-  # Chcesz np. 724 -> 1024 -> 512 -> 128 -> 256 -> 64?
-  # Po prostu wpisujesz warstwy dokładnie w takiej kolejności.
-  # ==========================================================================
-
-  # Główne warstwy wspólne dla całego modelu.
   layers:
     - neurons: 512
       norm: layer
@@ -70,41 +51,34 @@ model:
       activation: silu
       dropout: 0.0
 
-  # Dodatkowe warstwy tylko dla POLICY.
-  # POLICY na końcu automatycznie dostaje 361 wyjść - po jednym na każde pole.
-  # Jeśli nie chcesz dodatkowych warstw, zostaw pustą listę: []
   policy_layers: []
 
-  # Dodatkowe warstwy tylko dla VALUE.
-  # VALUE na końcu automatycznie dostaje 1 wyjście z tanh, czyli zakres [-1, +1].
   value_layers:
     - neurons: 64
       norm: none
       activation: silu
       dropout: 0.0
 
-  # Opcjonalna kompilacja modelu przez torch.compile.
   compile: false
   compile_mode: "default"  # default | reduce-overhead | max-autotune
 
 training:
   device: "cuda"
 
-  # Liczba plansz rozgrywanych równolegle podczas self-play.
+  # Liczba plansz rozgrywanych równolegle.
   num_envs: 16384
 
-  # Do uczenia trafiają wyłącznie pełne partie.
-  # Po zebraniu co najmniej tylu pozycji z zakończonych partii wszystkie
-  # aktualnie niedokończone partie są wyrzucane, a PPO aktualizuje model.
+  # Ta wartość oznacza liczbę minibatchy terminalnych pozycji na update.
+  # Faktyczny cel pozycji = completed_positions_per_update * minibatch_size.
   completed_positions_per_update: 512
 
-  # Maksymalna liczba aktualizacji modelu.
+  # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 100000
 
   # --------------------------------------------------------------------------
-  # PPO
+  # PPO / CREDIT ASSIGNMENT
   # --------------------------------------------------------------------------
-  ppo_epochs: 2 # maksymalna liczba epok, approx_kl i tak sam ogarnia limit
+  ppo_epochs: 2
   minibatch_size: 4096
   learning_rate: 0.0003
   lr_schedule: "cosine"     # constant | cosine
@@ -117,22 +91,36 @@ training:
   target_kl: 0.03
   normalize_advantage: true
 
-  # Na razie wyłączone, aby nie psuć old_logprob używanego przez PPO.
+  # Terminalny wynik jest cofany o gamma za każdy kamień/akcję pomiędzy
+  # zapisaną decyzją a końcem partii. Ostatni ruch ma mnożnik 1.0.
+  gamma: 0.995
+
   symmetry_augmentation: false
+
+  # --------------------------------------------------------------------------
+  # HISTORYCZNY SELF-PLAY / ANTI-FORGETTING
+  # --------------------------------------------------------------------------
+  # Jaka część stołów gra current-vs-history. 0.125 = dokładnie 1/8.
+  historical_fraction: 0.125
+
+  # Ile losowych checkpointów historycznych próbujemy trzymać równocześnie
+  # w VRAM podczas jednego update'u. Jeśli dostępnych jest mniej, bierzemy tyle,
+  # ile istnieje. Nowy zestaw jest losowany przed każdym update'em PPO.
+  historical_models_per_update: 8
+
+  # Historyczny model jest tylko przeciwnikiem. Jego ruchy NIGDY nie trafiają
+  # do bufora PPO. Current gra w historycznych partiach losowo czarnymi/białymi.
 
   # --------------------------------------------------------------------------
   # EKSPLORACJA PODCZAS SELF-PLAY
   # --------------------------------------------------------------------------
-  # 1.0 oznacza zwykły softmax.
-  # Wartość poniżej 1.0 wyostrza rozkład i częściej wybiera najlepsze logity.
   temperature_start: 1.00
   temperature_end: 1.00
   temperature_decay_updates: 5000
 
-  # Mixed precision na GPU.
   amp: true
   amp_dtype: "bfloat16"     # bfloat16 | float16
 
-  # Autosave i dashboard.
+  # Przy numeracji od 1 checkpoint_every_updates: 10 zapisuje 10,20,30,...
   checkpoint_every_updates: 10
   dashboard_every_updates: 5
