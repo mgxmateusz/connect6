@@ -1,7 +1,3 @@
-zmienić na trening nocny:
 
 
-czarny musi zaczynać w losowym miejscu inaczej model nie umie grać z boku planszy - czyli w 50% przypadków ignorujemy co wybiera model i stawiamy go losowo na planszy, oczywiście nie uczymy na tym modelu bo to nie jego decyzja. więc nie zapisujemy do bufora tego.
-
-wprowadzić symmetry_augmentation na zasadzie obracamy przy każdej turze plansze o 90 stopni a nastepnie mirror i kolejno znowu 4 razy po 90 stopni
-
+gdy reserved przewyższa 11 usuwamy cashe

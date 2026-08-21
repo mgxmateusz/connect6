@@ -78,7 +78,7 @@ training:
   # --------------------------------------------------------------------------
   # PPO / CREDIT ASSIGNMENT
   # --------------------------------------------------------------------------
-  ppo_epochs: 4
+  ppo_epochs: 3
 
   # Duży minibatch lepiej wykorzystuje GPU i zmniejsza szum pojedynczego KL.
   minibatch_size: 16384
