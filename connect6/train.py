@@ -213,6 +213,93 @@ def _sample_actions_only(
     return Categorical(logits=logits).sample()
 
 
+def _symmetry_for_phase(phase: int) -> tuple[int, bool]:
+    """Eight-step D4 cycle: 0/90/180/270, mirror, then 4 rotations mirrored."""
+    phase = int(phase) % 8
+    return phase % 4, phase >= 4
+
+
+def _transform_boards(
+    boards: torch.Tensor,
+    k: int,
+    flip: bool,
+) -> torch.Tensor:
+    """Transform board coordinates exactly as seen by a policy."""
+    k = int(k) % 4
+    out = torch.rot90(boards, k=k, dims=(-2, -1)) if k else boards
+    return torch.flip(out, dims=(-1,)) if flip else out
+
+
+def _transform_actions(
+    actions: torch.Tensor,
+    board_size: int,
+    k: int,
+    flip: bool,
+) -> torch.Tensor:
+    """Map canonical actions into coordinates of `_transform_boards`."""
+    n = int(board_size)
+    k = int(k) % 4
+    r = torch.div(actions, n, rounding_mode="floor")
+    c = actions.remainder(n)
+    if k == 1:
+        r, c = n - 1 - c, r
+    elif k == 2:
+        r, c = n - 1 - r, n - 1 - c
+    elif k == 3:
+        r, c = c, n - 1 - r
+    if flip:
+        c = n - 1 - c
+    return r * n + c
+
+
+def _inverse_transform_actions(
+    actions: torch.Tensor,
+    board_size: int,
+    k: int,
+    flip: bool,
+) -> torch.Tensor:
+    """Map policy-view actions back into canonical environment coordinates."""
+    n = int(board_size)
+    k = int(k) % 4
+    r = torch.div(actions, n, rounding_mode="floor")
+    c = actions.remainder(n)
+
+    # Forward transform is rotate first, mirror second, therefore inverse must
+    # undo the mirror first and then apply the inverse rotation.
+    if flip:
+        c = n - 1 - c
+    if k == 1:
+        r, c = c, n - 1 - r
+    elif k == 2:
+        r, c = n - 1 - r, n - 1 - c
+    elif k == 3:
+        r, c = n - 1 - c, r
+    return r * n + c
+
+
+def _forced_random_opening_mask(
+    move_count: torch.Tensor,
+    current_player: torch.Tensor,
+    stones_left: torch.Tensor,
+    fraction: float,
+) -> torch.Tensor:
+    """Select fresh black openings that must be random and excluded from PPO."""
+    fresh_black = (
+        move_count.eq(0)
+        & current_player.eq(1)
+        & stones_left.eq(1)
+    )
+    fraction = float(fraction)
+    if fraction <= 0.0:
+        return torch.zeros_like(fresh_black)
+    if fraction >= 1.0:
+        return fresh_black
+    return fresh_black & torch.rand(
+        move_count.shape,
+        device=move_count.device,
+    ).lt(fraction)
+
+
 def _model_count(models_or_count: Any) -> int:
     if isinstance(models_or_count, int):
         return max(0, models_or_count)
@@ -345,6 +432,15 @@ def train(config_path: str | Path) -> None:
     if not 0.0 < gamma <= 1.0:
         raise ValueError("gamma musi należeć do przedziału (0, 1]")
 
+    random_black_opening_fraction = float(
+        tr.get("random_black_opening_fraction", 0.0)
+    )
+    if not 0.0 <= random_black_opening_fraction <= 1.0:
+        raise ValueError(
+            "random_black_opening_fraction musi należeć do przedziału [0, 1]"
+        )
+    symmetry_augmentation = bool(tr.get("symmetry_augmentation", False))
+
     historical_fraction = float(tr.get("historical_fraction", 0.0))
     if not 0.0 <= historical_fraction <= 1.0:
         raise ValueError("historical_fraction musi należeć do przedziału [0, 1]")
@@ -443,16 +539,11 @@ def train(config_path: str | Path) -> None:
     dashboard_every = max(1, int(tr.get("dashboard_every_updates", 5)))
     lr_schedule = str(tr.get("lr_schedule", "cosine")).lower()
 
-    if bool(tr.get("symmetry_augmentation", False)):
-        print(
-            "[uwaga] symmetry_augmentation jest ignorowane: post-hoc transformacja "
-            "nie zachowuje old_logprob PPO."
-        )
-
     games_total = 0
     historical_games_total = 0
     historical_ensemble: HistoricalPolicyEnsemble | None = None
     history_ram_cache = HistoricalCheckpointCache(historical_ram_cache_models)
+    symmetry_phase = 0
 
     print(f"[urządzenie] {device}")
     if device.type == "cuda":
@@ -476,6 +567,14 @@ def train(config_path: str | Path) -> None:
         f"rolling_window={kl_window} | hard={kl_hard_multiplier:.1f}x"
     )
     print(f"[credit] gamma={gamma:.6f} per stone/action")
+    print(
+        f"[opening] random black opening={random_black_opening_fraction:.0%} | "
+        "forced move is never stored in PPO"
+    )
+    print(
+        "[symmetry] online D4 cycle: "
+        + ("0/90/180/270 + mirror rotations" if symmetry_augmentation else "off")
+    )
     print(
         f"[model] parameters: "
         f"{sum(p.numel() for p in getattr(model, '_orig_mod', model).parameters()):,}"
@@ -625,8 +724,38 @@ def train(config_path: str | Path) -> None:
 
             with torch.inference_mode():
                 while completed_positions < completed_target:
-                    network_input = env.network_input()
-                    legal = env.legal_mask()
+                    # ONLINE augmentation: the policy really sees this transformed
+                    # board. Its sampled action is kept in the same transformed
+                    # coordinates in PPO, then mapped back only for env.step().
+                    if symmetry_augmentation:
+                        symmetry_k, symmetry_flip = _symmetry_for_phase(
+                            symmetry_phase
+                        )
+                        view_boards = _transform_boards(
+                            env.boards,
+                            symmetry_k,
+                            symmetry_flip,
+                        )
+                    else:
+                        symmetry_k, symmetry_flip = 0, False
+                        view_boards = env.boards
+
+                    network_input = canonical_network_input(
+                        view_boards,
+                        env.current_player,
+                        env.stones_left,
+                    )
+                    legal = view_boards.reshape(num_envs, -1).eq(0)
+
+                    # Exactly once per fresh game we make an independent Bernoulli
+                    # choice. Forced black openings use a uniform board action and
+                    # are excluded from current_idx, so they can never enter PPO.
+                    forced_opening_mask = _forced_random_opening_mask(
+                        env.move_count,
+                        env.current_player,
+                        env.stones_left,
+                        random_black_opening_fraction,
+                    )
 
                     current_actor_mask = ~historical_mask
                     if history_tables:
@@ -634,12 +763,27 @@ def train(config_path: str | Path) -> None:
                             historical_mask
                             & env.current_player.eq(historical_current_colors)
                         )
+                    current_actor_mask = current_actor_mask & ~forced_opening_mask
 
-                    actions = torch.empty(num_envs, dtype=torch.long, device=device)
+                    if random_black_opening_fraction > 0.0:
+                        # Random values remain active only on forced fresh openings.
+                        # Every other table is overwritten below by current/history.
+                        actions_view = torch.randint(
+                            0,
+                            board_size * board_size,
+                            (num_envs,),
+                            dtype=torch.long,
+                            device=device,
+                        )
+                    else:
+                        actions_view = torch.empty(
+                            num_envs,
+                            dtype=torch.long,
+                            device=device,
+                        )
 
                     # This dynamic compaction is intentionally retained for safety:
-                    # only current-policy moves may enter PPO. Removing it would
-                    # require changing buffer semantics, not merely an optimization.
+                    # only actual current-policy decisions may enter PPO.
                     current_idx = torch.nonzero(
                         current_actor_mask, as_tuple=False
                     ).flatten()
@@ -653,9 +797,9 @@ def train(config_path: str | Path) -> None:
                             legal[current_idx],
                             temperature,
                         )
-                        actions[current_idx] = current_actions
+                        actions_view[current_idx] = current_actions
                         buffer.append_batch(
-                            boards=env.boards[current_idx],
+                            boards=view_boards[current_idx],
                             players=env.current_player[current_idx],
                             stones_left=env.stones_left[current_idx],
                             move_counts=env.move_count[current_idx],
@@ -666,9 +810,9 @@ def train(config_path: str | Path) -> None:
                         )
                         current_segment_lengths[current_idx] += 1
 
-                    # One fixed-shape history forward. We sample all valid history
-                    # slots too, then use a GPU torch.where to override ONLY turns
-                    # actually owned by the frozen opponent. No CUDA->CPU .any().
+                    # History sees the exact same transformed coordinates as current.
+                    # Forced opening rows are deliberately not overwritten by either
+                    # policy, regardless of which side owns Black on that table.
                     if historical_ensemble is not None and history_tables:
                         grouped_input = network_input[history_table_matrix]
                         grouped_legal = legal[history_table_matrix]
@@ -686,9 +830,13 @@ def train(config_path: str | Path) -> None:
                         grouped_current_colors = historical_current_colors[
                             history_table_matrix
                         ]
+                        grouped_forced_opening = forced_opening_mask[
+                            history_table_matrix
+                        ]
                         old_turn = (
                             history_table_valid
                             & grouped_players.ne(grouped_current_colors)
+                            & ~grouped_forced_opening
                         )
 
                         valid_old_turn = old_turn.reshape(-1)[
@@ -697,13 +845,25 @@ def train(config_path: str | Path) -> None:
                         valid_history_actions = grouped_actions.reshape(-1)[
                             history_valid_flat_positions
                         ]
-                        actions[history_flat_tables] = torch.where(
+                        actions_view[history_flat_tables] = torch.where(
                             valid_old_turn,
                             valid_history_actions,
-                            actions[history_flat_tables],
+                            actions_view[history_flat_tables],
                         )
 
-                    step = env.step(actions)
+                    if symmetry_augmentation:
+                        env_actions = _inverse_transform_actions(
+                            actions_view,
+                            board_size,
+                            symmetry_k,
+                            symmetry_flip,
+                        )
+                    else:
+                        env_actions = actions_view
+
+                    step = env.step(env_actions)
+                    if symmetry_augmentation:
+                        symmetry_phase = (symmetry_phase + 1) % 8
 
                     # `done_idx` is retained because reset/episode IDs are variable
                     # length state. We avoid adding many EXTRA synchronizations on
@@ -790,7 +950,16 @@ def train(config_path: str | Path) -> None:
             )
 
             # Release the last collector outputs before the much larger PPO pass.
-            del network_input, legal, actions, current_actor_mask, current_idx
+            del (
+                network_input,
+                legal,
+                actions_view,
+                env_actions,
+                view_boards,
+                forced_opening_mask,
+                current_actor_mask,
+                current_idx,
+            )
             if history_tables:
                 del (
                     grouped_input,
@@ -799,6 +968,7 @@ def train(config_path: str | Path) -> None:
                     grouped_actions,
                     grouped_players,
                     grouped_current_colors,
+                    grouped_forced_opening,
                     old_turn,
                     valid_old_turn,
                     valid_history_actions,
@@ -1203,21 +1373,11 @@ def _transform_board_actions(
     k: int,
     flip: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """D4 transform retained for tests; not used by PPO collection."""
-    n = boards.shape[-1]
-    out = torch.rot90(boards, k=k, dims=(-2, -1)) if k else boards
-    r = torch.div(actions, n, rounding_mode="floor")
-    c = actions.remainder(n)
-    if k == 1:
-        r, c = n - 1 - c, r
-    elif k == 2:
-        r, c = n - 1 - r, n - 1 - c
-    elif k == 3:
-        r, c = c, n - 1 - r
-    if flip:
-        out = torch.flip(out, dims=(-1,))
-        c = n - 1 - c
-    return out, r * n + c
+    """Apply one D4 transform consistently to board and action coordinates."""
+    return (
+        _transform_boards(boards, k, flip),
+        _transform_actions(actions, boards.shape[-1], k, flip),
+    )
 
 
 def main() -> None:
