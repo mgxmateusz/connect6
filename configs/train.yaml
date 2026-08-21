@@ -105,7 +105,15 @@ training:
   # zapisaną decyzją a końcem partii. Ostatni ruch ma mnożnik 1.0.
   gamma: 0.99
 
-  symmetry_augmentation: false
+  # ONLINE D4: każdy kolejny krok collectora zmienia widok planszy w cyklu:
+  # 0°, 90°, 180°, 270°, mirror, mirror+90°, mirror+180°, mirror+270°.
+  # Do PPO trafia dokładnie plansza i akcja widziana przez model. Dopiero akcja
+  # wysyłana do środowiska jest przeliczana z powrotem na realne współrzędne.
+  symmetry_augmentation: true
+
+  # W tylu nowych partiach pierwszy kamień Czarnych jest wymuszony losowo na
+  # całej planszy. Ten ruch NIE jest decyzją policy i nigdy nie trafia do PPO.
+  random_black_opening_fraction: 0.50
 
   # --------------------------------------------------------------------------
   # HISTORYCZNY SELF-PLAY / ANTI-FORGETTING
