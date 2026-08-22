@@ -134,8 +134,7 @@ def choose_backend_and_dtype(
             for dtype_name in dtypes:
                 if dtype_name not in ("bfloat16", "float16"):
                     continue
-                scores: list[float] = []
-                peaks: list[float] = []
+                local_results: list[tuple[float, int, float]] = []
                 for tables in tables_list:
                     try:
                         r = super_tuner._bench_stream_config(
@@ -161,26 +160,26 @@ def choose_backend_and_dtype(
                         )
                         torch.cuda.empty_cache()
                         continue
-                    scores.append(r.adjusted_games_per_second)
-                    peaks.append(r.peak_vram_gb)
+                    local_results.append(
+                        (r.adjusted_games_per_second, tables, r.peak_vram_gb)
+                    )
                     print(
                         f"[BACKEND] {backend_name:>12} {dtype_name:>8} "
                         f"T={tables:>3} | {r.adjusted_games_per_second:>7.1f} gry/s | "
                         f"VRAM {r.peak_vram_gb:.2f} GB"
                     )
-                if scores:
-                    # Bierzemy najlepszą lokalną wydajność backendu; głęboki tuner
-                    # później i tak ponownie dobierze tables dla zwycięskiej ścieżki.
-                    best_local = max(scores)
-                    best_idx = scores.index(best_local)
+                if local_results:
+                    best_local, best_tables, best_peak = max(
+                        local_results, key=lambda item: item[0]
+                    )
                     results.append(
                         (
                             best_local,
                             backend_name,
                             dtype_name,
                             backend_cls,
-                            tables_list[best_idx],
-                            peaks[best_idx],
+                            best_tables,
+                            best_peak,
                         )
                     )
     finally:
@@ -210,9 +209,6 @@ def run(config_path: str | Path) -> None:
 
     # Wszystkie dalsze benchmarki i właściwy turniej korzystają już z wybranego backendu.
     stream.DirectIndexedEnsemble = backend_cls
-    tuned_cfg = copy.deepcopy(cfg)
-    ch = tuned_cfg.get("championship", tuned_cfg)
-    ch["amp_dtype"] = dtype_name
 
     # super_tuner.run czyta YAML ponownie, więc tymczasowo podmieniamy reader, aby
     # zwycięski dtype trafił także do jego benchmarków bez modyfikowania pliku.
