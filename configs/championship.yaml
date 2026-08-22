@@ -33,16 +33,18 @@ championship:
     # -------------------------------------------------------------------------
     # CNN BACKEND AUTOTUNE
     # -------------------------------------------------------------------------
+    # Coarse sweep co 64 stoły aż do 512. BMM skalował się wraz z batch size,
+    # więc nie kończymy testu przy 256.
     backend_autotune:
       enabled: true
-      tables: [64, 96, 128, 160, 192, 256]
+      tables: [64, 128, 192, 256, 320, 384, 448, 512]
       model_block: 32
       refill: 24
       sync: 1
       amp_dtypes: ["bfloat16", "float16"]
-      warmup_games: 128
-      measure_games: 768
-      max_seconds_per_test: 12.0
+      warmup_games: 64
+      measure_games: 384
+      max_seconds_per_test: 10.0
 
     # -------------------------------------------------------------------------
     # ALL-RESIDENT MODE — JEDYNA ŚCIEŻKA TURNIEJU
@@ -56,17 +58,16 @@ championship:
     # Każda konfiguracja tables/refill/sync rozgrywa dokładnie ten sam zamknięty
     # zestaw gier. Dzięki temu różna długość partii nie fałszuje benchmarku.
     resident_autotune:
-      table_candidates:
-        [64, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512,
-         640, 768, 896, 1024, 1280, 1536, 1792, 2048]
+      # Coarse sweep co 64 stoły. Nie testujemy już gęsto co 32.
+      table_candidates: [64, 128, 192, 256, 320, 384, 448, 512]
 
       refill_candidates: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
       sync_candidates: [1, 2, 4, 6, 8]
 
-      # Osobny identyczny warmup dla każdego testu, potem identyczny corpus.
-      fixed_warmup_games: 2048
-      fixed_measure_games: 4096
-      fixed_validation_games: 12288
+      # Krótki, identyczny corpus dla każdej konfiguracji.
+      fixed_warmup_games: 256
+      fixed_measure_games: 1024
+      fixed_validation_games: 2048
 
     progress_every_seconds: 5.0
     progress_every_matches: 500
