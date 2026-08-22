@@ -31,7 +31,15 @@ def _fixed_step(
 
     with _legacy._autocast_context(self.device, self.amp, self.amp_dtype):
         logits = self.ensemble.forward_indexed_direct(x, actor_ids)
-    chosen = _legacy._choose_actions(logits, legal, self.temperature, self.generator)
+
+    if self.temperature <= 0:
+        # Argmax nie potrzebuje FP32. Stary helper wykonywał logits.float() dla
+        # całego [B,361] przy każdym ruchu; tutaj maskujemy bez zmiany dtype.
+        chosen = logits.masked_fill(~legal, float("-inf")).argmax(dim=1)
+    else:
+        chosen = _legacy._choose_actions(
+            logits, legal, self.temperature, self.generator
+        )
 
     # Inactive sloty są zamrożone przez active mask, więc nie potrzebujemy już
     # kosztownego legal_all.to(int8).argmax(361) tylko po to, by stworzyć dummy.
