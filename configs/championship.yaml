@@ -34,6 +34,25 @@ championship:
     refill_batch: 32
     model_pool_block_size: 64
 
+    # -------------------------------------------------------------------------
+    # CNN BACKEND AUTOTUNE
+    # -------------------------------------------------------------------------
+    # Najpierw porównujemy dwa sposoby liczenia wielu różnych CNN naraz:
+    # GROUPED_CONV = obecne conv2d(groups=B)
+    # BMM_IM2COL   = unfold/im2col + torch.bmm (batched GEMM / Tensor Cores)
+    # Dodatkowo benchmarkowane są BF16 i FP16. Zwycięski backend + dtype jest
+    # używany później przez cały deep scheduler autotune i właściwy turniej.
+    backend_autotune:
+      enabled: true
+      tables: [96, 112, 128, 144]
+      model_block: 32
+      refill: 24
+      sync: 1
+      amp_dtypes: ["bfloat16", "float16"]
+      warmup_games: 64
+      measure_games: 384
+      max_seconds_per_test: 8.0
+
     # Stary autotuner pozostaje jako fallback dla CPU/wyłączonego deep tunera.
     min_tables: 16
     max_tables: 2048
@@ -53,16 +72,14 @@ championship:
       # Gęsty sweep wokół dotychczasowego optimum 128.
       table_candidates: [64, 80, 96, 112, 128, 144, 160, 192, 224, 256]
 
-      # UWAGA: blok modeli może być większy niż liczba stołów. Compute nadal
-      # wykonuje tylko tyle grup CNN, ile jest aktywnych plansz; większy blok
-      # zmniejsza liczbę przełączeń pul modeli.
+      # Blok modeli może być większy niż liczba stołów. Compute nadal wykonuje
+      # tylko tyle aktywnych plansz, ile jest stołów; większy blok zmniejsza
+      # liczbę przełączeń pul modeli.
       model_block_candidates: [32, 48, 64, 96, 128, 160, 192, 256]
 
       refill_candidates: [8, 16, 24, 32, 48, 64, 96]
       sync_candidates: [1, 2, 4, 6, 8, 12, 16]
 
-      # Każdy test najpierw rozgrzewa scheduler, potem mierzy rzeczywiście
-      # zakończone gry. To celowo jest dłuższe i dokładniejsze niż poprzedni test.
       warmup_games: 64
       measure_games: 384
       validation_games: 768
