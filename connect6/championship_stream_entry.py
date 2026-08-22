@@ -38,10 +38,6 @@ def _fixed_step(
     done, winner = base._masked_step(self.env, full_actions, self.active)
     newly_done = self.active & done
 
-    # WAŻNE: winners jest długowiecznym mutable state schedulera.
-    # Nie wolno rebindować go wynikiem torch.where utworzonym w inference_mode,
-    # bo wtedy staje się inference tensor i późniejszy refill poza tym kontekstem
-    # nie może wykonać inplace update. Kopiujemy wynik do istniejącego tensora.
     self.winners.copy_(torch.where(newly_done, winner, self.winners))
     self.active.logical_and_(~done)
     self._moves_since_sync += 1
@@ -56,11 +52,16 @@ stream.GlobalTableScheduler.step = _fixed_step
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="King of Connect6 — global persistent CNN championship"
+        description="King of Connect6 — deeply autotuned persistent CNN championship"
     )
     parser.add_argument("--config", default="configs/championship.yaml")
     args = parser.parse_args()
-    stream.run(args.config)
+
+    # Import po podmianie step(): tuner benchmarkuje dokładnie tę samą ścieżkę,
+    # której później używa właściwy turniej.
+    from . import championship_super_tuner
+
+    championship_super_tuner.run(args.config)
 
 
 if __name__ == "__main__":
