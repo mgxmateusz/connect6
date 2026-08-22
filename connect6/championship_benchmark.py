@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from pathlib import Path
 
 import torch
@@ -24,12 +25,12 @@ def run(config_path: str | Path) -> None:
     cfg = base._ORIGINAL_READ_YAML(config_path)
     ch = cfg.get("championship", cfg)
     adaptive = ch.get("adaptive_tables", {}) or {}
+    bench_cfg = ch.get("benchmark", {}) or {}
 
     device = _legacy._torch_device(str(ch.get("device", "cuda")))
     if device.type != "cuda":
         raise RuntimeError("Benchmark championship wymaga CUDA")
 
-    # Benchmarkujemy dokładnie finalną architekturę runtime: BMM + FP16 + fast env.
     backend_cls = backend_tuner.BMMIndexedEnsemble
     dtype_name = "float16"
     stream.DirectIndexedEnsemble = backend_cls
@@ -67,6 +68,20 @@ def run(config_path: str | Path) -> None:
     reserved = torch.cuda.memory_reserved(device) / 2**30
     print(f"[LOAD] alloc={alloc:.2f} GB | reserved={reserved:.2f} GB")
 
+    benchmark_adaptive = copy.deepcopy(adaptive)
+    benchmark_adaptive["resident_autotune"] = {
+        "table_candidates": bench_cfg.get(
+            "table_candidates", [64, 128, 192, 256, 320, 384, 448, 512]
+        ),
+        "refill_candidates": bench_cfg.get(
+            "refill_candidates", [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
+        ),
+        "sync_candidates": bench_cfg.get("sync_candidates", [1, 2, 4, 6, 8]),
+        "fixed_warmup_games": int(bench_cfg.get("warmup_games", 256)),
+        "fixed_measure_games": int(bench_cfg.get("measure_games", 1024)),
+        "fixed_validation_games": int(bench_cfg.get("validation_games", 2048)),
+    }
+
     try:
         tuned_ch = dict(ch)
         tuned_ch["amp_dtype"] = dtype_name
@@ -74,7 +89,7 @@ def run(config_path: str | Path) -> None:
             ensemble,
             refs,
             ch=tuned_ch,
-            adaptive=adaptive,
+            adaptive=benchmark_adaptive,
         )
 
         print("\n" + "=" * 78)
@@ -85,8 +100,8 @@ def run(config_path: str | Path) -> None:
         print("  adaptive_tables:")
         print(f"    sync_interval_moves: {sync}")
         print(f"    refill_batch: {refill}")
-        print("\nBackend pozostaje na stałe: BMM_IM2COL + float16")
-        print("Po wpisaniu tych 3 wartości używaj tylko: python run_championship.py")
+        print("\nBackend na stałe: BMM_IM2COL + float16")
+        print("Potem uruchamiaj wyłącznie: python run_championship.py")
     finally:
         ensemble.release()
         del ensemble
