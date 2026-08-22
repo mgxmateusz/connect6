@@ -1,5 +1,5 @@
 # =============================================================================
-# KING OF CONNECT6 — ALL MODELS RESIDENT GPU CHAMPIONSHIP — CNN
+# KING OF CONNECT6 — FAST ALL-RESIDENT GPU CHAMPIONSHIP — CNN
 # =============================================================================
 
 championship:
@@ -22,20 +22,17 @@ championship:
   adaptive_tables:
     enabled: true
 
-    # Wszystkie checkpointy muszą siedzieć jednocześnie w lokalnym VRAM.
-    # Nie ma już model-pool fallbacku.
+    # Wszystkie checkpointy siedzą jednocześnie w VRAM. Nie ma model pools.
     vram_limit_gb: 11.0
     vram_check_every_forwards: 32
 
-    # Wartości bazowe używane przed autotuningiem.
+    # Wartości bazowe przed autotuningiem.
     sync_interval_moves: 1
     refill_batch: 32
 
     # -------------------------------------------------------------------------
     # CNN BACKEND AUTOTUNE
     # -------------------------------------------------------------------------
-    # Porównuje grouped-conv oraz im2col+BMM i BF16/FP16. Ten test pozostaje
-    # krótki; zwycięski backend/dtype trafia potem do resident deep tunera.
     backend_autotune:
       enabled: true
       tables: [64, 96, 128, 160, 192, 256]
@@ -54,12 +51,10 @@ championship:
       enabled: true
 
     # -------------------------------------------------------------------------
-    # ALL-RESIDENT DEEP AUTOTUNE
+    # FAST ENGINE + FIXED-CORPUS AUTOTUNE
     # -------------------------------------------------------------------------
-    # Szeroki sweep liczby stołów. Testujemy przede wszystkim wielokrotności 32,
-    # w tym dużo większe batche niż 128. Pomiar dla każdego T automatycznie
-    # skaluje się do min. kilku pełnych fal gier, więc duże batche nie są oceniane
-    # na zbyt krótkiej próbce.
+    # Każda konfiguracja tables/refill/sync rozgrywa dokładnie ten sam zamknięty
+    # zestaw gier. Dzięki temu różna długość partii nie fałszuje benchmarku.
     resident_autotune:
       table_candidates:
         [64, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512,
@@ -68,10 +63,10 @@ championship:
       refill_candidates: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
       sync_candidates: [1, 2, 4, 6, 8]
 
-      warmup_games: 256
-      measure_games: 2048
-      minimum_measure_waves: 4
-      validation_waves: 10
+      # Osobny identyczny warmup dla każdego testu, potem identyczny corpus.
+      fixed_warmup_games: 2048
+      fixed_measure_games: 4096
+      fixed_validation_games: 12288
 
     progress_every_seconds: 5.0
     progress_every_matches: 500
