@@ -4,48 +4,48 @@
 
 championship:
 
-  # Katalog z model_update_XXXXXXXX.pt
   checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
-
-  # Wyniki: matches.csv, ranking.csv, championship.html, state.json
   output_dir: "runs/connect6_cnn_01/championship"
 
-  # LICZBA PRAWDZIWIE RÓWNOLEGŁYCH STOŁÓW GPU.
-  #
-  # tables: 4 oznacza:
-  # - do 4 pojedynków liczonych równolegle,
-  # - różne modele-hosty są liczone równolegle przez grouped convolution,
-  # - challenger liczy wszystkie swoje pozycje zwykłym batchem CNN,
-  # - wagowo w VRAM podczas rundy jest około tables + 1 modeli.
-  #
-  # Zwiększaj stopniowo i obserwuj szybkość oraz VRAM.
+  # Wartość awaryjna. Przy adaptive_tables.enabled=true liczba stołów jest
+  # dobierana automatycznie po krótkim benchmarku GPU.
   tables: 128
 
-  # Liczba partii składających się na JEDEN pojedynek dwóch modeli.
-  # Musi być parzysta.
-  # 2 = 1 raz każdym kolorem
-  # 4 = 2 razy każdym kolorem
-  # 6 = 3 razy każdym kolorem
-  # Dopiero łączny wynik całej serii daje 3 / 1 / 0 pkt.
   games_per_pair: 2
-
-  # 0.0 = deterministyczny argmax.
-  # Przy 0.0 i games_per_pair > 2 partie z tym samym układem kolorów
-  # mogą być identyczne.
   temperature: 0.0
-
   device: "cuda"
-
-  # AMP dotyczy tylko inference mistrzostw.
   amp: true
   amp_dtype: "bfloat16"
 
-  # Ile odchudzonych checkpointów (bez optimizer state) trzymać w RAM.
-  # Zmniejsza ponowne czytanie tych samych plików z dysku.
-  # 0 = bez cache.
   cpu_cache_models: 16384
 
-  # Czy po wyrzuceniu grupy modeli czyścić nieużywany cache CUDA.
-  empty_cache_after_unload: true
+  # Adaptacyjny backend sam kontroluje presję VRAM. Nie opróżniamy cache CUDA
+  # po każdym challengerze, bo to obniża throughput.
+  empty_cache_after_unload: false
 
   seed: 12345
+
+  adaptive_tables:
+    enabled: true
+
+    # Twardy limit pamięci lokalnej GPU. Po jego przekroczeniu najpierw
+    # wykonywany jest empty_cache(); jeśli to nie wystarczy, rozmiar stołów
+    # zostaje oznaczony jako unsafe i turniej wznawia się z niższym poziomem.
+    vram_limit_gb: 11.0
+
+    # Zakres i kandydaci krótkiego autotestu na starcie.
+    min_tables: 16
+    max_tables: 2048
+    candidates: [16, 32, 64, 128, 256, 512, 1024, 2048]
+
+    # Krótki benchmark inference. Wyniki są zapisywane do
+    # runs/connect6_cnn_01/championship/adaptive_tables.json.
+    benchmark_warmup: 1
+    benchmark_iterations: 3
+
+    # Kontrola VRAM nie synchronizuje GPU przy każdym forwardzie.
+    vram_check_every_forwards: 32
+
+    # Sprawdzenie zakończenia całego batcha tylko co N kamieni zamiast co ruch.
+    # Martwe stoły są w międzyczasie maskowane i nie zmieniają stanu.
+    sync_interval_moves: 8
