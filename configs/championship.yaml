@@ -1,5 +1,5 @@
 # =============================================================================
-# KING OF CONNECT6 — GLOBAL PERSISTENT GPU CHAMPIONSHIP — CNN
+# KING OF CONNECT6 — ALL MODELS RESIDENT GPU CHAMPIONSHIP — CNN
 # =============================================================================
 
 championship:
@@ -22,67 +22,56 @@ championship:
   adaptive_tables:
     enabled: true
 
+    # Wszystkie checkpointy muszą siedzieć jednocześnie w lokalnym VRAM.
+    # Nie ma już model-pool fallbacku.
     vram_limit_gb: 11.0
     vram_check_every_forwards: 32
 
-    sync_interval_moves: 8
+    # Wartości bazowe używane przed autotuningiem.
+    sync_interval_moves: 1
     refill_batch: 32
-    model_pool_block_size: 64
 
     # -------------------------------------------------------------------------
     # CNN BACKEND AUTOTUNE
     # -------------------------------------------------------------------------
+    # Porównuje grouped-conv oraz im2col+BMM i BF16/FP16. Ten test pozostaje
+    # krótki; zwycięski backend/dtype trafia potem do resident deep tunera.
     backend_autotune:
       enabled: true
-      tables: [96, 112, 128, 144]
+      tables: [64, 96, 128, 160, 192, 256]
       model_block: 32
       refill: 24
       sync: 1
       amp_dtypes: ["bfloat16", "float16"]
-      warmup_games: 64
-      measure_games: 384
-      max_seconds_per_test: 8.0
+      warmup_games: 128
+      measure_games: 768
+      max_seconds_per_test: 12.0
 
     # -------------------------------------------------------------------------
-    # ALL-RESIDENT MODE
+    # ALL-RESIDENT MODE — JEDYNA ŚCIEŻKA TURNIEJU
     # -------------------------------------------------------------------------
-    # Najpierw próbujemy załadować WSZYSTKIE checkpointy do jednego ensemble GPU.
-    # Dla obecnej liczby modeli i FP16 powinno to zajmować tylko kilka GB, więc
-    # znikają całkowicie model pools, przeładowania i końcowe drainy każdej puli.
-    # Jeżeli rzeczywisty peak przekroczy vram_limit_gb, kod sam wraca do fallbacku.
     all_resident:
       enabled: true
 
-    # Po udanym all-resident load stroimy już tylko właściwy runtime:
-    # tables -> refill -> sync. Nie ma model_pool_block_size, bo nie ma pul.
+    # -------------------------------------------------------------------------
+    # ALL-RESIDENT DEEP AUTOTUNE
+    # -------------------------------------------------------------------------
+    # Szeroki sweep liczby stołów. Testujemy przede wszystkim wielokrotności 32,
+    # w tym dużo większe batche niż 128. Pomiar dla każdego T automatycznie
+    # skaluje się do min. kilku pełnych fal gier, więc duże batche nie są oceniane
+    # na zbyt krótkiej próbce.
     resident_autotune:
-      table_candidates: [96, 112, 120, 128, 136, 144]
-      refill_candidates: [8, 16, 24, 32, 48, 64]
+      table_candidates:
+        [64, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512,
+         640, 768, 896, 1024, 1280, 1536, 1792, 2048]
+
+      refill_candidates: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
       sync_candidates: [1, 2, 4, 6, 8]
-      warmup_games: 96
-      measure_games: 768
 
-    # -------------------------------------------------------------------------
-    # POOL FALLBACK
-    # -------------------------------------------------------------------------
-    # Używany tylko, jeśli all-resident nie zmieści się w budżecie VRAM.
-    min_tables: 16
-    max_tables: 2048
-    candidates: [16, 32, 64, 128, 256, 512, 1024, 2048]
-    benchmark_iterations: 3
-    benchmark_loop_moves: 8
-    benchmark_model_pool: 128
-
-    scheduler_autotune:
-      enabled: true
-      table_candidates: [64, 80, 96, 112, 128, 144, 160, 192, 224, 256]
-      model_block_candidates: [32, 48, 64, 96, 128, 160, 192, 256]
-      refill_candidates: [8, 16, 24, 32, 48, 64, 96]
-      sync_candidates: [1, 2, 4, 6, 8, 12, 16]
-      warmup_games: 64
-      measure_games: 384
-      validation_games: 768
-      max_seconds_per_test: 8.0
+      warmup_games: 256
+      measure_games: 2048
+      minimum_measure_waves: 4
+      validation_waves: 10
 
     progress_every_seconds: 5.0
     progress_every_matches: 500
