@@ -1,3 +1,0 @@
-
-
-gdy reserved przewyższa 11 usuwamy cashe
