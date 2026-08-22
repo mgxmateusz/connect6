@@ -1,4 +1,4 @@
-from connect6.championship_cnn import main
+from connect6.championship_stream import main
 
 
 if __name__ == "__main__":
