@@ -13,7 +13,7 @@ championship:
   temperature: 0.0
   device: "cuda"
   amp: true
-  amp_dtype: "bfloat16"
+  amp_dtype: "float16"
 
   cpu_cache_models: 16384
   empty_cache_after_unload: false
@@ -31,20 +31,15 @@ championship:
     refill_batch: 32
 
     # -------------------------------------------------------------------------
-    # CNN BACKEND AUTOTUNE
+    # CNN BACKEND — ZAMROŻONY PO BENCHMARKU
     # -------------------------------------------------------------------------
-    # Coarse sweep co 64 stoły aż do 512. BMM skalował się wraz z batch size,
-    # więc nie kończymy testu przy 256.
+    # BMM_IM2COL skaluje się znacznie lepiej z dużymi batchami; jego maksimum
+    # w sweepie 64..512 przypadło na 384 stoły. Nie benchmarkujemy backendu
+    # przy każdym starcie.
     backend_autotune:
-      enabled: true
-      tables: [64, 128, 192, 256, 320, 384, 448, 512]
-      model_block: 32
-      refill: 24
-      sync: 1
-      amp_dtypes: ["bfloat16", "float16"]
-      warmup_games: 64
-      measure_games: 384
-      max_seconds_per_test: 10.0
+      enabled: false
+      fixed_backend: "bmm_im2col"
+      fixed_dtype: "float16"
 
     # -------------------------------------------------------------------------
     # ALL-RESIDENT MODE — JEDYNA ŚCIEŻKA TURNIEJU
@@ -58,13 +53,10 @@ championship:
     # Każda konfiguracja tables/refill/sync rozgrywa dokładnie ten sam zamknięty
     # zestaw gier. Dzięki temu różna długość partii nie fałszuje benchmarku.
     resident_autotune:
-      # Coarse sweep co 64 stoły. Nie testujemy już gęsto co 32.
       table_candidates: [64, 128, 192, 256, 320, 384, 448, 512]
-
       refill_candidates: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
       sync_candidates: [1, 2, 4, 6, 8]
 
-      # Krótki, identyczny corpus dla każdej konfiguracji.
       fixed_warmup_games: 256
       fixed_measure_games: 1024
       fixed_validation_games: 2048
