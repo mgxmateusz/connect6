@@ -15,6 +15,7 @@ from .championship_fast_env import (
     assert_checkpoint_input_compatibility,
     assert_gameplay_compatibility,
 )
+from .championship_stream_entry import _fixed_step
 
 base = stream.base
 _legacy = stream._legacy
@@ -34,6 +35,7 @@ def run(config_path: str | Path) -> None:
     backend_cls = backend_tuner.BMMIndexedEnsemble
     dtype_name = "float16"
     stream.DirectIndexedEnsemble = backend_cls
+    stream.GlobalTableScheduler.step = _fixed_step
     FastChampionshipConnect6.network_dtype = torch.float16
     _legacy.VectorConnect6 = FastChampionshipConnect6
 
