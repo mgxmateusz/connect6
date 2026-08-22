@@ -32,8 +32,6 @@ class Connect6Game:
 
     Ruch składający się z dwóch kamieni jest reprezentowany jako dwie kolejne
     decyzje tej samej sieci. Przeciwnik nie wykonuje ruchu pomiędzy nimi.
-    Dzięki temu model potrzebuje tylko 361 wyjść zamiast wszystkich możliwych
-    par pustych pól.
     """
 
     def __init__(self, board_size: int = 19, win_length: int = 6):
@@ -54,8 +52,8 @@ class Connect6Game:
         return self.board_size * self.board_size
 
     @property
-    def input_size(self) -> int:
-        return self.action_size * 2 + 2
+    def input_channels(self) -> int:
+        return 3
 
     def reset(self) -> None:
         self.board.fill(EMPTY)
@@ -90,27 +88,23 @@ class Connect6Game:
         return np.flatnonzero(self.legal_mask())
 
     def network_input(self) -> np.ndarray:
-        """Buduje jeden zwykły wektor wejściowy MLP.
+        """Buduje kanoniczne wejście CNN [3, H, W].
 
-        Dla planszy 19x19 wynik ma 724 wartości:
-          0..360   = moje kamienie,
-          361..721 = kamienie przeciwnika,
-          722      = liczba kamieni pozostałych w turze / 2,
-          723      = 1, jeśli aktualny gracz jest czarny, inaczej 0.
+        Kanały:
+          0 = moje kamienie,
+          1 = kamienie przeciwnika,
+          2 = czy aktualna decyzja jest ostatnim kamieniem w turze.
         """
-        me = (self.board == self.current_player).astype(np.float32).reshape(-1)
-        opp = (self.board == -self.current_player).astype(np.float32).reshape(-1)
-        dodatkowe = np.asarray(
-            [
-                self.stones_left_in_turn / 2.0,
-                1.0 if self.current_player == BLACK else 0.0,
-            ],
+        me = (self.board == self.current_player).astype(np.float32)
+        opp = (self.board == -self.current_player).astype(np.float32)
+        last = np.full_like(
+            me,
+            1.0 if self.stones_left_in_turn == 1 else 0.0,
             dtype=np.float32,
         )
-        return np.concatenate((me, opp, dodatkowe), axis=0)
+        return np.stack((me, opp, last), axis=0)
 
     def observation(self) -> np.ndarray:
-        """Alias zachowany dla zgodności z wcześniejszym kodem."""
         return self.network_input()
 
     def step(self, action: int) -> MoveResult:
@@ -151,7 +145,6 @@ class Connect6Game:
         return MoveResult(0.0, False, EMPTY, actor, player_after, sign)
 
     def _check_win_from(self, row: int, col: int, player: int) -> bool:
-        """Sprawdza tylko cztery linie przechodzące przez nowy kamień."""
         for dr, dc in ((1, 0), (0, 1), (1, 1), (1, -1)):
             count = 1
             for direction in (-1, 1):
