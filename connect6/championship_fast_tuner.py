@@ -93,11 +93,7 @@ def deep_fixed_corpus_autotune(
             int(v)
             for v in tune.get(
                 "table_candidates",
-                [
-                    64, 96, 128, 160, 192, 224, 256,
-                    320, 384, 448, 512, 640, 768,
-                    896, 1024, 1280, 1536, 1792, 2048,
-                ],
+                [64, 128, 192, 256, 320, 384, 448, 512],
             )
             if 2 <= int(v) <= len(refs)
         }
@@ -112,11 +108,15 @@ def deep_fixed_corpus_autotune(
     sync_candidates = sorted(
         {int(v) for v in tune.get("sync_candidates", [1, 2, 4, 6, 8])}
     )
-    warmup_count = max(512, int(tune.get("fixed_warmup_games", 2048)))
-    coarse_count = max(2048, int(tune.get("fixed_measure_games", 4096)))
+
+    # Honoruj wartości z benchmark config. Dolne limity są tylko ochroną przed
+    # przypadkowo absurdalnie małą próbą, a nie ukrytym wydłużaniem benchmarku.
+    warmup_count = max(64, int(tune.get("fixed_warmup_games", 256)))
+    coarse_count = max(128, int(tune.get("fixed_measure_games", 1024)))
     validation_count = max(
-        coarse_count, int(tune.get("fixed_validation_games", 12288))
+        coarse_count, int(tune.get("fixed_validation_games", 2048))
     )
+
     amp = bool(ch.get("amp", True))
     amp_dtype = str(ch.get("amp_dtype", "bfloat16"))
     temperature = float(ch.get("temperature", 0.0))
@@ -207,7 +207,7 @@ def deep_fixed_corpus_autotune(
     sync_scores.sort(reverse=True)
     best_sync = sync_scores[0][1]
 
-    print("\n[FIXED TUNE] długi retest top-3 tables")
+    print("\n[FIXED TUNE] retest top-3 tables")
     finalists: list[tuple[float, int, int, int]] = []
     for _score, tables in table_scores[:3]:
         scaled_refill = min(
