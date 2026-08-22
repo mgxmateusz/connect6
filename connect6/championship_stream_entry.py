@@ -38,7 +38,6 @@ def _fixed_step(
     done, winner = base._masked_step(self.env, full_actions, self.active)
     newly_done = self.active & done
 
-    # Mutable state schedulera musi pozostać zwykłym tensorem, a nie inference tensor.
     self.winners.copy_(torch.where(newly_done, winner, self.winners))
     self.active.logical_and_(~done)
     self._moves_since_sync += 1
@@ -53,16 +52,14 @@ stream.GlobalTableScheduler.step = _fixed_step
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="King of Connect6 — backend + scheduler deep autotune"
+        description="King of Connect6 — all models resident in VRAM"
     )
     parser.add_argument("--config", default="configs/championship.yaml")
     args = parser.parse_args()
 
-    # Import dopiero po podmianie step(): wszystkie benchmarki korzystają dokładnie
-    # z tej samej ścieżki schedulera co właściwy turniej.
-    from . import championship_backend_tuner
+    from . import championship_resident_only
 
-    championship_backend_tuner.run(args.config)
+    championship_resident_only.run(args.config)
 
 
 if __name__ == "__main__":
