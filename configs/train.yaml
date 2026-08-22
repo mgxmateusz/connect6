@@ -52,7 +52,7 @@ training:
 
   minibatch_size: 1024
 
-  learning_rate: 0.0003
+  learning_rate: 0.0002
   lr_schedule: "cosine"     # constant | cosine
   weight_decay: 0.0001
   adam_eps: 0.00001
@@ -63,7 +63,7 @@ training:
 
   target_kl: 0.03
   kl_window: 32
-  kl_hard_multiplier: 2.0
+  kl_hard_multiplier: 3
 
   normalize_advantage: true
 
