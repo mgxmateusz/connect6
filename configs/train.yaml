@@ -36,11 +36,11 @@ training:
   device: "cuda"
 
   # Liczba plansz rozgrywanych równolegle.
-  num_envs: 8192
+  num_envs: 2048
 
   # Faktyczny cel PPO = completed_positions_per_update * minibatch_size.
   # Dla CNN minibatch=256 odpowiada najlepszemu zakresowi z benchmarków RTX 5070.
-  completed_positions_per_update: 256
+  completed_positions_per_update: 2048
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 10000000
@@ -48,9 +48,9 @@ training:
   # --------------------------------------------------------------------------
   # PPO / CREDIT ASSIGNMENT
   # --------------------------------------------------------------------------
-  ppo_epochs: 3
+  ppo_epochs: 2
 
-  minibatch_size: 256
+  minibatch_size: 512
 
   learning_rate: 0.0003
   lr_schedule: "cosine"     # constant | cosine
@@ -59,7 +59,7 @@ training:
   clip_coef: 0.2
   value_coef: 0.50
   entropy_coef: 0.0125
-  max_grad_norm: 1.0
+  max_grad_norm: 2.0
 
   target_kl: 0.03
   kl_window: 32
@@ -102,5 +102,5 @@ training:
   amp: true
   amp_dtype: "bfloat16"     # bfloat16 | float16
 
-  checkpoint_every_updates: 10
+  checkpoint_every_updates: 1
   dashboard_every_updates: 1
