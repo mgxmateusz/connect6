@@ -7,7 +7,6 @@ from pathlib import Path
 import torch
 
 from . import championship_backend_tuner as backend_tuner
-from . import championship_fast_tuner as fast_tuner
 from . import championship_resident as resident
 from . import championship_stream as stream
 from .championship_fast_env import (
@@ -20,53 +19,15 @@ base = stream.base
 _legacy = stream._legacy
 
 
-def _dtype_from_name(name: str) -> torch.dtype:
-    if name == "float16":
-        return torch.float16
-    if name == "bfloat16":
-        return torch.bfloat16
-    return torch.float32
-
-
-def _select_backend(config_path: Path, cfg: dict):
-    ch = cfg.get("championship", cfg)
-    adaptive = ch.get("adaptive_tables", {}) or {}
-    tune = adaptive.get("backend_autotune", {}) or {}
-
-    if bool(tune.get("enabled", True)):
-        return backend_tuner.choose_backend_and_dtype(config_path, cfg)
-
-    name = str(tune.get("fixed_backend", "grouped_conv")).lower()
-    dtype_name = str(tune.get("fixed_dtype", ch.get("amp_dtype", "float16"))).lower()
-
-    if name in ("bmm", "bmm_im2col", "im2col_bmm"):
-        backend_cls = backend_tuner.BMMIndexedEnsemble
-        pretty = "BMM_IM2COL"
-    elif name in ("grouped", "grouped_conv", "conv"):
-        backend_cls = stream.DirectIndexedEnsemble
-        pretty = "GROUPED_CONV"
-    else:
-        raise ValueError(f"Nieznany fixed_backend: {name}")
-
-    if dtype_name not in ("float16", "bfloat16"):
-        raise ValueError("fixed_dtype musi być 'float16' albo 'bfloat16'")
-
-    print("\n" + "=" * 78)
-    print("CNN INFERENCE BACKEND — FIXED")
-    print("=" * 78)
-    print(f"[BACKEND FIXED] {pretty} + {dtype_name} | autotune pominięty")
-    return backend_cls, dtype_name
-
-
 def run(config_path: str | Path) -> None:
     config_path = Path(config_path).resolve()
     cfg = base._ORIGINAL_READ_YAML(config_path)
 
-    backend_cls, dtype_name = _select_backend(config_path, cfg)
+    # Championship ma stały backend. Żadnego backend autotuningu przy starcie.
+    backend_cls = backend_tuner.BMMIndexedEnsemble
+    dtype_name = "float16"
     stream.DirectIndexedEnsemble = backend_cls
-
-    dtype = _dtype_from_name(dtype_name)
-    FastChampionshipConnect6.network_dtype = dtype
+    FastChampionshipConnect6.network_dtype = torch.float16
 
     device = _legacy._torch_device(
         str(cfg.get("championship", cfg).get("device", "cuda"))
@@ -74,17 +35,15 @@ def run(config_path: str | Path) -> None:
     print("\n" + "=" * 78)
     print("FAST CHAMPIONSHIP ENGINE COMPATIBILITY")
     print("=" * 78)
-    assert_checkpoint_input_compatibility(device, dtype=dtype)
+    assert_checkpoint_input_compatibility(device, dtype=torch.float16)
     assert_gameplay_compatibility(device)
     print(
         "[FAST ENGINE] input checkpointów: OK | zasady/turn state: OK | "
-        f"network dtype={dtype_name}"
+        "backend=BMM_IM2COL | dtype=float16"
     )
 
-    # Championship używa wyłącznie wyspecjalizowanego silnika. Treningowy
-    # VectorConnect6 pozostaje nietknięty i checkpointy widzą identyczny input.
+    # Treningowy VectorConnect6 pozostaje nietknięty; tylko championship używa fast env.
     _legacy.VectorConnect6 = FastChampionshipConnect6
-    resident._benchmark_resident_scheduler = fast_tuner.deep_fixed_corpus_autotune
 
     tuned_cfg = copy.deepcopy(cfg)
     ch = tuned_cfg.get("championship", tuned_cfg)
@@ -98,14 +57,14 @@ def run(config_path: str | Path) -> None:
     )
     if not ok:
         raise RuntimeError(
-            "All-resident fast championship jest wymagany, ale modele nie "
-            "zmieściły się w skonfigurowanym limicie VRAM."
+            "Fast all-resident championship nie może wystartować — modele nie "
+            "zmieściły się w skonfigurowanym limicie VRAM lub CUDA jest niedostępna."
         )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Connect6 championship — fast checkpoint-compatible engine"
+        description="Connect6 championship — fixed BMM FP16 fast engine"
     )
     parser.add_argument("--config", default="configs/championship.yaml")
     args = parser.parse_args()
