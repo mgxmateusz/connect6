@@ -1,5 +1,5 @@
 # =============================================================================
-# KING OF CONNECT6 — TRUE PARALLEL AI CHAMPIONSHIP — CNN
+# KING OF CONNECT6 — PERSISTENT STREAMING CNN CHAMPIONSHIP
 # =============================================================================
 
 championship:
@@ -8,7 +8,7 @@ championship:
   output_dir: "runs/connect6_cnn_01/championship"
 
   # Wartość awaryjna. Przy adaptive_tables.enabled=true liczba stołów jest
-  # dobierana automatycznie po krótkim benchmarku GPU.
+  # dobierana automatycznie po autotescie GPU.
   tables: 128
 
   games_per_pair: 2
@@ -18,34 +18,36 @@ championship:
   amp_dtype: "bfloat16"
 
   cpu_cache_models: 16384
-
-  # Adaptacyjny backend sam kontroluje presję VRAM. Nie opróżniamy cache CUDA
-  # po każdym challengerze, bo to obniża throughput.
   empty_cache_after_unload: false
-
   seed: 12345
 
   adaptive_tables:
     enabled: true
 
-    # Twardy limit pamięci lokalnej GPU. Po jego przekroczeniu najpierw
-    # wykonywany jest empty_cache(); jeśli to nie wystarczy, rozmiar stołów
-    # zostaje oznaczony jako unsafe i turniej wznawia się z niższym poziomem.
+    # Twardy budżet lokalnego VRAM. Po przekroczeniu cache jest czyszczony,
+    # a jeśli to nie pomaga, rozmiar stołów zostaje trwale oznaczony jako unsafe.
     vram_limit_gb: 11.0
 
-    # Zakres i kandydaci krótkiego autotestu na starcie.
     min_tables: 16
     max_tables: 2048
     candidates: [16, 32, 64, 128, 256, 512, 1024, 2048]
 
-    # Krótki benchmark inference. Wyniki są zapisywane do
-    # runs/connect6_cnn_01/championship/adaptive_tables.json.
-    benchmark_warmup: 1
+    # Autotuner mierzy 3 osobne workloady:
+    # 1) HOST-HOST — wiele różnych CNN naraz,
+    # 2) CROSS — wiele hostów + jeden challenger batchowany na wielu planszach,
+    # 3) FULL-LOOP — wejście CNN + policy + action + krok środowiska.
     benchmark_iterations: 3
+    benchmark_loop_moves: 8
 
-    # Kontrola VRAM nie synchronizuje GPU przy każdym forwardzie.
+    # Scheduler nie synchronizuje CPU/GPU po każdym kamieniu.
+    sync_interval_moves: 8
     vram_check_every_forwards: 32
 
-    # Sprawdzenie zakończenia całego batcha tylko co N kamieni zamiast co ruch.
-    # Martwe stoły są w międzyczasie maskowane i nie zmieniają stanu.
-    sync_interval_moves: 8
+    # Persistent streaming: gdy zbierze się co najmniej tyle wolnych miejsc,
+    # wrzucany jest kolejny cohort gier. Nie zatrzymujemy całego GPU dla jednej gry.
+    refill_batch: 32
+
+    # Modele są ładowane do GPU pulami i pozostają tam przez wiele pojedynków.
+    # Dla dwóch bloków naraz liczba modeli w ensemble to maks. 2 * ta wartość.
+    # Backend dodatkowo ogranicza ją tak, by nie przekroczyć aktualnej liczby stołów.
+    model_pool_block_size: 64
