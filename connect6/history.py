@@ -18,8 +18,6 @@ _UPDATE_RE = re.compile(r"model_update_(\d+)\.pt$")
 
 @dataclass(slots=True)
 class HistoricalModel:
-    """Legacy compatibility container used by older tests/tools."""
-
     path: Path
     update: int
     model: torch.nn.Module
@@ -34,27 +32,8 @@ class HistoricalCheckpoint:
     game_config: dict[str, Any]
 
 
-@dataclass(slots=True)
-class BatchedLayer:
-    weight: torch.Tensor
-    bias: torch.Tensor | None
-    norm: str
-    activation: str
-    norm_weight: torch.Tensor | None = None
-    norm_bias: torch.Tensor | None = None
-    running_mean: torch.Tensor | None = None
-    running_var: torch.Tensor | None = None
-    eps: float = 1e-5
-
-
 class HistoricalCheckpointCache:
-    """Bounded LRU cache of lean historical checkpoints in system RAM.
-
-    Versioned checkpoints are immutable, therefore keeping their CPU model_state
-    tensors in RAM is safe. The cache is deliberately bounded so a long training
-    run can never consume all host memory just because the checkpoint directory
-    keeps growing.
-    """
+    """Ograniczony LRU cache lekkich checkpointów historycznych w RAM."""
 
     def __init__(self, max_models: int = 0) -> None:
         self.max_models = max(0, int(max_models))
@@ -99,8 +78,6 @@ def _lean_cache_path(checkpoint_path: Path) -> Path:
 
 
 def _load_lean_checkpoint(path: Path) -> HistoricalCheckpoint:
-    """Read a lightweight history payload, creating a disk sidecar if needed."""
-
     update = checkpoint_update(path)
     if update is None:
         raise ValueError(f"Niepoprawna nazwa checkpointu: {path.name}")
@@ -122,7 +99,6 @@ def _load_lean_checkpoint(path: Path) -> HistoricalCheckpoint:
             torch.save(payload, tmp)
             tmp.replace(cache_path)
         except OSError:
-            # Disk cache is only an optimization. Failure must not kill training.
             try:
                 if tmp.exists():
                     tmp.unlink()
@@ -148,14 +124,6 @@ def load_random_historical_checkpoints(
     required_game_config: dict[str, Any] | None = None,
     ram_cache: HistoricalCheckpointCache | None = None,
 ) -> list[HistoricalCheckpoint]:
-    """Choose a random compatible pool of old checkpoints for one PPO update.
-
-    `latest.pt` is ignored. Lean disk sidecars exclude optimizer state, while the
-    optional RAM LRU cache avoids repeated torch.load/deserialization for recently
-    used opponents. One grouped bmm requires identical tensor shapes, therefore
-    every returned checkpoint belongs to one compatible model/game family.
-    """
-
     requested_count = max(0, int(requested_count))
     if requested_count == 0:
         return []
@@ -191,7 +159,6 @@ def load_random_historical_checkpoints(
     for path in candidates:
         if len(loaded) >= requested_count:
             break
-
         try:
             checkpoint = ram_cache.get(path) if ram_cache is not None else _load_lean_checkpoint(path)
         except (RuntimeError, KeyError, ValueError, OSError) as exc:
@@ -201,7 +168,7 @@ def load_random_historical_checkpoints(
         cfg = _normalized_model_cfg(checkpoint.model_config)
         board_size = int(checkpoint.game_config["board_size"])
         win_length = int(checkpoint.game_config.get("win_length", 6))
-        if int(cfg.get("architecture_version", 1)) != 3:
+        if int(cfg.get("architecture_version", 0)) != 4:
             continue
 
         if family_model is None:
@@ -211,22 +178,18 @@ def load_random_historical_checkpoints(
 
         if cfg != family_model or board_size != family_board or win_length != family_win:
             continue
-
         loaded.append(checkpoint)
 
     return loaded
 
 
 class HistoricalPolicyEnsemble:
-    """Many frozen historical MLP policies evaluated as one batched GPU model.
+    """Wiele zamrożonych polityk CNN liczonych jednym grouped-conv na warstwę.
 
-    Weights are stacked as [MODELS, OUT, IN]. Inputs are grouped by permanently
-    assigned tables and have shape [MODELS, TABLES_PER_MODEL, IN]. Each MLP layer
-    is one torch.bmm across every historical model instead of a Python loop issuing
-    tiny forwards. Only the shared trunk and policy head are materialized.
-
-    `dtype` controls only frozen opponent inference storage/compute. It does not
-    alter the trainable current model architecture or its LayerNorm modules.
+    Wejście ma [MODELE, STOŁY, 3, H, W]. Dla każdej warstwy modele są składane
+    w grupy kanałów i wykonywany jest jeden F.conv2d(groups=MODELE), dzięki czemu
+    zachowujemy wcześniejszą zaletę: brak pętli małych forwardów model-po-modelu.
+    Liczona jest wyłącznie policy; historyczne VALUE nie jest potrzebne.
     """
 
     def __init__(
@@ -248,36 +211,33 @@ class HistoricalPolicyEnsemble:
         first_cfg = _normalized_model_cfg(checkpoints[0].model_config)
         first_game = checkpoints[0].game_config
         self.board_size = int(first_game["board_size"])
+        self.kernels = tuple(int(v) for v in first_cfg.get("kernels", (23, 3, 3, 3, 3, 3, 3, 3)))
+        self.channels = tuple(int(v) for v in first_cfg.get("channels", (32, 32, 64, 64, 64, 96, 96, 96)))
+        self.input_channels = 3
 
         for cp in checkpoints[1:]:
             if int(cp.game_config["board_size"]) != self.board_size:
                 raise ValueError("Historyczne checkpointy używają różnych rozmiarów planszy")
             if _normalized_model_cfg(cp.model_config) != first_cfg:
-                raise ValueError("Historyczne checkpointy mają różne architektury MLP")
+                raise ValueError("Historyczne checkpointy mają różne architektury CNN")
 
         states = [cp.model_state for cp in checkpoints]
-        shared_cfg = list(first_cfg.get("layers") or [])
-        policy_cfg = list(first_cfg.get("policy_layers") or [])
+        self.conv_weights: list[torch.Tensor] = []
+        self.conv_biases: list[torch.Tensor | None] = []
+        for i in range(len(self.kernels)):
+            self.conv_weights.append(self._stack(states, f"convs.{i}.weight"))
+            self.conv_biases.append(self._stack_optional(states, f"convs.{i}.bias"))
 
-        self.shared_layers = self._build_layers(states, "layers", shared_cfg)
-        self.policy_layers = self._build_layers(states, "policy_layers", policy_cfg)
         self.policy_weight = self._stack(states, "policy_output.weight")
         self.policy_bias = self._stack_optional(states, "policy_output.bias")
-        self.action_size = int(self.policy_weight.shape[1])
-
-        first_weight = self.shared_layers[0].weight if self.shared_layers else self.policy_weight
-        self.input_size = int(first_weight.shape[-1])
+        self.action_size = self.board_size * self.board_size
 
     def _stack(self, states: list[dict[str, torch.Tensor]], key: str) -> torch.Tensor:
         try:
             tensor = torch.stack([state[key].detach().cpu() for state in states], dim=0)
         except KeyError as exc:
             raise KeyError(f"Brak parametru {key} w historycznych checkpointach") from exc
-        return tensor.to(
-            device=self.device,
-            dtype=self.dtype,
-            non_blocking=True,
-        )
+        return tensor.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
     def _stack_optional(
         self,
@@ -288,102 +248,56 @@ class HistoricalPolicyEnsemble:
             return None
         return self._stack(states, key)
 
-    def _build_layers(
+    def _grouped_conv(
         self,
-        states: list[dict[str, torch.Tensor]],
-        prefix: str,
-        configs: list[dict[str, Any]],
-    ) -> list[BatchedLayer]:
-        result: list[BatchedLayer] = []
-        for i, cfg in enumerate(configs):
-            base = f"{prefix}.{i}.warstwa"
-            norm = str(cfg.get("norm", "none")).lower()
-            activation = str(cfg.get("activation", "silu")).lower()
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        padding: int,
+    ) -> torch.Tensor:
+        # x: [M,T,C,H,W], weight: [M,O,C,K,K]
+        m, t, c, h, w = x.shape
+        out_channels = int(weight.shape[1])
+        kernel = int(weight.shape[-1])
 
-            layer = BatchedLayer(
-                weight=self._stack(states, f"{base}.0.weight"),
-                bias=self._stack_optional(states, f"{base}.0.bias"),
-                norm=norm,
-                activation=activation,
-            )
-
-            if norm == "layer":
-                layer.norm_weight = self._stack(states, f"{base}.1.weight")
-                layer.norm_bias = self._stack(states, f"{base}.1.bias")
-            elif norm == "batch":
-                layer.norm_weight = self._stack(states, f"{base}.1.weight")
-                layer.norm_bias = self._stack(states, f"{base}.1.bias")
-                layer.running_mean = self._stack(states, f"{base}.1.running_mean")
-                layer.running_var = self._stack(states, f"{base}.1.running_var")
-            elif norm not in ("none", "identity", "off"):
-                raise ValueError(f"Nieobsługiwana normalizacja history ensemble: {norm}")
-
-            result.append(layer)
-        return result
-
-    @staticmethod
-    def _activate(x: torch.Tensor, name: str) -> torch.Tensor:
-        if name in ("none", "identity", "off"):
-            return x
-        if name == "silu":
-            return F.silu(x)
-        if name == "gelu":
-            return F.gelu(x)
-        if name == "relu":
-            return F.relu(x)
-        if name == "tanh":
-            return torch.tanh(x)
-        if name == "sigmoid":
-            return torch.sigmoid(x)
-        raise ValueError(f"Nieobsługiwana aktywacja history ensemble: {name}")
-
-    def _apply_layer(self, x: torch.Tensor, layer: BatchedLayer) -> torch.Tensor:
-        # x [M, T, IN], w [M, OUT, IN]
-        # bmm -> [M, OUT, T] -> [M, T, OUT]
-        x = torch.bmm(layer.weight, x.transpose(1, 2)).transpose(1, 2)
-        if layer.bias is not None:
-            x = x + layer.bias.unsqueeze(1)
-
-        if layer.norm == "layer":
-            # F.layer_norm uses the same biased variance convention as nn.LayerNorm
-            # but can use a fused CUDA implementation. Per-model affine parameters
-            # are applied afterwards because their leading model dimension differs.
-            x = F.layer_norm(x, (x.shape[-1],), weight=None, bias=None, eps=layer.eps)
-            if layer.norm_weight is not None:
-                x = x * layer.norm_weight.unsqueeze(1)
-            if layer.norm_bias is not None:
-                x = x + layer.norm_bias.unsqueeze(1)
-        elif layer.norm == "batch":
-            assert layer.running_mean is not None and layer.running_var is not None
-            x = (x - layer.running_mean.unsqueeze(1)) * torch.rsqrt(
-                layer.running_var.unsqueeze(1) + layer.eps
-            )
-            if layer.norm_weight is not None:
-                x = x * layer.norm_weight.unsqueeze(1)
-            if layer.norm_bias is not None:
-                x = x + layer.norm_bias.unsqueeze(1)
-
-        return self._activate(x, layer.activation)
+        grouped_x = x.permute(1, 0, 2, 3, 4).reshape(t, m * c, h, w)
+        grouped_w = weight.reshape(m * out_channels, c, kernel, kernel)
+        grouped_b = bias.reshape(m * out_channels) if bias is not None else None
+        y = F.conv2d(
+            grouped_x,
+            grouped_w,
+            grouped_b,
+            stride=1,
+            padding=padding,
+            groups=m,
+        )
+        return y.reshape(t, m, out_channels, h, w).permute(1, 0, 2, 3, 4)
 
     def forward_grouped(self, x: torch.Tensor) -> torch.Tensor:
-        """Return policy logits for [models, fixed_tables_per_model, input]."""
-        if x.ndim != 3:
-            raise ValueError("History ensemble oczekuje wejścia [MODELE, STOŁY, INPUT]")
-        if x.shape[0] != self.num_models or x.shape[2] != self.input_size:
+        if x.ndim != 5:
+            raise ValueError(
+                "History ensemble oczekuje wejścia [MODELE, STOŁY, 3, H, W]"
+            )
+        expected_tail = (self.input_channels, self.board_size, self.board_size)
+        if x.shape[0] != self.num_models or tuple(x.shape[2:]) != expected_tail:
             raise ValueError(
                 f"Niepoprawny history batch {tuple(x.shape)}; oczekiwano "
-                f"[{self.num_models}, T, {self.input_size}]"
+                f"[{self.num_models}, T, {expected_tail[0]}, {expected_tail[1]}, {expected_tail[2]}]"
             )
 
         if x.device != self.device or x.dtype != self.dtype:
             x = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
-        for layer in self.shared_layers:
-            x = self._apply_layer(x, layer)
-        for layer in self.policy_layers:
-            x = self._apply_layer(x, layer)
+        for kernel, weight, bias in zip(
+            self.kernels, self.conv_weights, self.conv_biases
+        ):
+            x = self._grouped_conv(x, weight, bias, kernel // 2)
+            x = F.silu(x)
 
-        logits = torch.bmm(self.policy_weight, x.transpose(1, 2)).transpose(1, 2)
-        if self.policy_bias is not None:
-            logits = logits + self.policy_bias.unsqueeze(1)
-        return logits
+        logits = self._grouped_conv(
+            x,
+            self.policy_weight,
+            self.policy_bias,
+            padding=0,
+        )
+        return logits.squeeze(2).flatten(2)
