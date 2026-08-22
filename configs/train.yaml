@@ -52,7 +52,7 @@ training:
 
   minibatch_size: 1024
 
-  learning_rate: 0.0002
+  learning_rate: 0.00025
   lr_schedule: "cosine"     # constant | cosine
   weight_decay: 0.0001
   adam_eps: 0.00001
