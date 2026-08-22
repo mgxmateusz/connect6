@@ -25,7 +25,6 @@ def test_opening_and_two_stone_turns():
 
 def test_horizontal_win_cpu():
     g = Connect6Game(board_size=9, win_length=6)
-    # Tworzymy bezpośrednio stan potrzebny do testu reguły wygranej.
     g.board[4, 1:6] = BLACK
     g.current_player = BLACK
     g.stones_left_in_turn = 1
@@ -44,11 +43,20 @@ def test_diagonal_win_cpu():
     assert result.winner == WHITE
 
 
-def test_observation_shape():
+def test_observation_shape_and_channels():
     g = Connect6Game()
     network_input = g.network_input()
-    assert network_input.shape == (724,)
+    assert network_input.shape == (3, 19, 19)
     assert network_input.dtype == np.float32
+    assert not network_input[0].any()
+    assert not network_input[1].any()
+    assert network_input[2].all()  # opening = ostatni jedyny kamień tej tury
+
+    g.step(g.rc_to_action(9, 9))
+    white_input = g.network_input()
+    assert white_input.shape == (3, 19, 19)
+    assert white_input[1, 9, 9] == 1.0
+    assert not white_input[2].any()  # biały zaczyna turę z dwoma kamieniami
 
 
 def test_vector_env_cpu_device():
@@ -63,4 +71,5 @@ def test_vector_env_cpu_device():
     result = env.step(actions)
     assert result.done.shape == (4,)
     network_input = env.network_input()
-    assert network_input.shape == (4, 164)
+    assert network_input.shape == (4, 3, 9, 9)
+    assert network_input.dtype == torch.float32

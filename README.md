@@ -1,34 +1,23 @@
-# Connect6 AI Lab — wersja MLP
+# Connect6 AI Lab — CNN
 
-Projekt do trenowania jednej zwykłej sieci **MLP** grającej w Connect6 przeciwko samej sobie.
+Projekt do trenowania jednej sieci **CNN** grającej w Connect6 przeciwko samej sobie metodą PPO.
 
 Najważniejsze elementy:
 
 - szybkie headless self-play na wielu planszach jednocześnie;
 - trening PPO na GPU;
 - do treningu trafiają wyłącznie pełne, zakończone partie;
-- niedokończone partie są wyrzucane po zapełnieniu bufora;
-- jeden zwykły wektor wejściowy MLP;
-- brak CNN, convolutions, residual blocks i innych architektur przestrzennych;
-- dowolnie edytowalne warstwy `Linear`;
-- osobna normalizacja, aktywacja i dropout dla każdej warstwy;
-- SiLU dostępne jako podstawowa aktywacja;
+- kanoniczne wejście przestrzenne `3 x 19 x 19`;
+- ośmiowarstwowy backbone CNN z SiLU;
+- POLICY jako `Conv 1x1 -> 361 logitów`;
+- w pełni konwolucyjny VALUE head;
+- online augmentacja D4 (obroty + odbicia);
+- historyczny self-play z wieloma checkpointami liczonymi grouped CNN;
+- losowe otwarcia czarnych jako eksploracja;
 - autosave checkpointów i automatyczne wznawianie;
-- dashboard HTML z wykresami treningu;
-- GUI: człowiek vs człowiek, człowiek vs AI, AI vs AI;
-- benchmark wydajności;
-- headless test model vs model.
+- dashboard HTML, GUI, benchmark i headless model-vs-model.
 
-## 1. Instalacja
-
-Na RTX 5070 użyj PyTorch z obsługą odpowiedniej wersji CUDA dla kart Blackwell.
-W projekcie znajduje się pomocniczy plik:
-
-```bat
-install_windows_rtx50.bat
-```
-
-Możesz też zainstalować ręcznie środowisko i wymagania:
+## Instalacja i uruchamianie
 
 ```bat
 py -m venv .venv
@@ -38,8 +27,6 @@ pip install torch --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 python check_gpu.py
 ```
-
-## 2. Uruchamianie
 
 Trening:
 
@@ -59,327 +46,105 @@ Benchmark:
 python run_benchmark.py --config configs/train.yaml --steps 500
 ```
 
-Test checkpoint kontra checkpoint:
-
-```bat
-python run_evaluate.py SCIEZKA_A.pt SCIEZKA_B.pt --games 100
-```
-
-Testy projektu:
+Testy:
 
 ```bat
 pytest -q
 ```
 
-## 3. Wejście modelu
+## Wejście modelu
 
-Standardowa plansza Connect6 ma `19 x 19 = 361` pól.
-
-Model dostaje jeden zwykły wektor:
+Dla planszy 19x19 model dostaje tensor:
 
 ```text
-361 wartości  moje kamienie
-361 wartości  kamienie przeciwnika
-1 wartość     ile kamieni zostało w tej turze / 2
-1 wartość     czy aktualny gracz jest czarny
------------------------------------------------
-724 wartości razem
+[B, 3, 19, 19]
 ```
 
-Kolejność wejścia:
+Kanały:
 
 ```text
-0..360     moje kamienie
-361..721   kamienie przeciwnika
-722        stones_left / 2
-723        is_black
+0  moje kamienie          0/1
+1  kamienie przeciwnika   0/1
+2  ostatni kamień tury    0/1
 ```
 
-Kamienie są zawsze przedstawiane z perspektywy gracza wykonującego decyzję.
-Dlatego jedna sieć może grać zarówno czarnymi, jak i białymi.
+Trzeci kanał jest cały wypełniony zerami albo jedynkami. `1` oznacza, że aktualna decyzja jest ostatnim kamieniem bieżącej tury (`stones_left == 1`).
 
-## 4. Architektura MLP
+Kolor gracza nie jest wejściem. Plansza jest zawsze przedstawiana jako `ja / przeciwnik`, więc strategicznie identyczna pozycja ma identyczną reprezentację niezależnie od fizycznego koloru kamieni.
 
-Całą architekturę edytujesz w:
+## Architektura CNN
+
+Domyślna architektura znajduje się w `configs/train.yaml`:
 
 ```text
-configs/train.yaml
+INPUT  3 x 19 x 19
+
+I      23x23   3  -> 32   + SiLU
+II      3x3   32  -> 32   + SiLU
+III     3x3   32  -> 64   + SiLU
+IV      3x3   64  -> 64   + SiLU
+V       3x3   64  -> 64   + SiLU
+VI      3x3   64  -> 96   + SiLU
+VII     3x3   96  -> 96   + SiLU
+VIII    3x3   96  -> 96   + SiLU
+
+POLICY  1x1   96  -> 1    -> 19x19 -> 361 logits
+VALUE   1x1   96  -> 1    -> global mean -> tanh
 ```
 
-Przykład:
+Wszystkie warstwy używają `stride=1` i paddingu zachowującego `19x19`. Receptive field rośnie:
+
+```text
+23 -> 25 -> 27 -> 29 -> 31 -> 33 -> 35 -> 37
+```
+
+czyli na końcu także predykcja pola w rogu może zależeć od przeciwległego rogu planszy.
+
+Konfiguracja:
 
 ```yaml
 model:
-  architecture_version: 3
-
-  layers:
-    - neurons: 1024
-      norm: layer
-      activation: silu
-      dropout: 0.0
-
-    - neurons: 512
-      norm: none
-      activation: silu
-      dropout: 0.0
-
-    - neurons: 256
-      norm: layer
-      activation: silu
-      dropout: 0.0
-
-    - neurons: 128
-      norm: none
-      activation: silu
-      dropout: 0.0
+  architecture_version: 4
+  kernels: [23, 3, 3, 3, 3, 3, 3, 3]
+  channels: [32, 32, 64, 64, 64, 96, 96, 96]
 ```
 
-Daje to zwykłą sieć:
+## POLICY i VALUE
+
+To nadal jeden model z jednym wspólnym backbone.
+
+`POLICY` daje mapę `1 x 19 x 19`, która jest spłaszczana do 361 logitów. Zajęte pola są maskowane przed utworzeniem rozkładu ruchów.
+
+`VALUE` jest wymagane przez PPO. Zamiast MLP używa osobnej konwolucji `1x1`; jej mapa jest uśredniana po planszy i przechodzi przez `tanh`, dając jedną ocenę pozycji w `[-1, 1]`.
+
+## Symetrie i losowe otwarcie
+
+`D4` pozostaje w treningu. Zwykły CNN współdzieli filtry przestrzennie, ale nie jest automatycznie ekwiwariantny na obrót 90° ani odbicie lustrzane. Collector nadal cyklicznie pokazuje osiem orientacji i odpowiednio transformuje akcje.
+
+Losowy pierwszy kamień Czarnych również pozostaje. Nie jest częścią PPO i służy wyłącznie do zwiększenia różnorodności otwarć oraz częstszego pokazywania modelowi pozycji poza centrum.
+
+## Historyczny self-play
+
+Stare modele tej samej architektury CNN nadal mogą być używane jako zamrożeni przeciwnicy. Zamiast wcześniejszego batched MLP, ich warstwy są składane w **grouped convolution**, dzięki czemu wiele checkpointów jest liczonych równolegle na GPU bez osobnego forwardu dla każdego modelu.
+
+Checkpointy MLP `architecture_version: 3` nie są zgodne z CNN `architecture_version: 4` i są ignorowane jako historyczni przeciwnicy.
+
+## Checkpointy
+
+Domyślny run:
 
 ```text
-724 -> 1024 -> 512 -> 256 -> 128
+runs/connect6_cnn_01/
 ```
 
-Chcesz inną szerokość? Wpisujesz inną liczbę neuronów.
+Przy `resume: "auto"` trening wznawia najnowszy checkpoint z tego runu. Zmiana nazwy runu celowo odcina automatyczne wznawianie starego modelu MLP.
 
-Na przykład:
+## GUI i ewaluacja
 
-```yaml
-layers:
-  - neurons: 2048
-    norm: layer
-    activation: silu
-    dropout: 0.0
-
-  - neurons: 512
-    norm: none
-    activation: silu
-    dropout: 0.0
-
-  - neurons: 128
-    norm: none
-    activation: silu
-    dropout: 0.0
-
-  - neurons: 256
-    norm: layer
-    activation: silu
-    dropout: 0.0
-
-  - neurons: 64
-    norm: none
-    activation: silu
-    dropout: 0.0
-```
-
-Daje:
-
-```text
-724 -> 2048 -> 512 -> 128 -> 256 -> 64
-```
-
-Nie ma wymogu, aby kolejne warstwy były coraz mniejsze.
-
-### Parametry pojedynczej warstwy
-
-```yaml
-- neurons: 512
-  norm: layer
-  activation: silu
-  dropout: 0.0
-```
-
-`neurons` — liczba neuronów warstwy.
-
-`norm`:
-
-```text
-none
-layer
-batch
-```
-
-`activation`:
-
-```text
-silu
-gelu
-relu
-tanh
-sigmoid
-none
-```
-
-`dropout`:
-
-```text
-0.0 = brak dropout
-0.1 = 10%
-0.2 = 20%
-```
-
-Każda warstwa ma własne ustawienia.
-
-## 5. Dlaczego są POLICY i VALUE
-
-To nadal jest **jeden model**.
-
-Po ostatniej wspólnej warstwie sieć ma dwie końcówki:
-
-```text
-                 wspólne MLP
-                     |
-              +------+------+
-              |             |
-           POLICY         VALUE
-              |             |
-        361 logitów      1 wartość
-```
-
-`POLICY` odpowiada za wybór ruchu.
-
-Ma dokładnie `361` wyjść — po jednym na każde pole planszy.
-Zajęte pola są maskowane, a z pozostałych logitów powstaje rozkład softmax.
-
-`VALUE` ocenia aktualną pozycję jedną liczbą w zakresie `[-1, +1]`.
-
-Dodatkowe warstwy tylko dla POLICY można dopisać w:
-
-```yaml
-policy_layers:
-```
-
-Dodatkowe warstwy tylko dla VALUE można dopisać w:
-
-```yaml
-value_layers:
-```
-
-Jeśli `policy_layers: []`, POLICY wychodzi bezpośrednio z końca wspólnego MLP.
-
-## 6. Pełne partie w buforze
-
-Wagi modelu są zamrożone podczas zbierania danych jednego update'u.
-
-Przykład:
-
-```text
-1024 plansze zaczynają od zera
-        ↓
-grają równolegle
-        ↓
-zakończona partia -> cała trafia do bufora
-        ↓
-kolejna zakończona partia -> cała trafia do bufora
-        ↓
->= completed_positions_per_update
-        ↓
-niedokończone partie -> kosz
-        ↓
-PPO aktualizuje model
-        ↓
-wszystkie plansze od zera na nowych wagach
-```
-
-Każda decyzja w kompletnej partii dostaje prawdziwy końcowy wynik:
-
-```text
-+1  gracz wykonujący decyzję ostatecznie wygrał
--1  gracz wykonujący decyzję ostatecznie przegrał
- 0  remis
-```
-
-## 7. Najważniejsze parametry treningu
-
-```yaml
-training:
-  num_envs: 1024
-  completed_positions_per_update: 65536
-  ppo_epochs: 4
-  minibatch_size: 2048
-  learning_rate: 0.0003
-```
-
-`num_envs` — liczba równoległych plansz.
-
-`completed_positions_per_update` — minimalna liczba pozycji pochodzących z pełnych partii przed jednym update'em PPO.
-
-`ppo_epochs` — ile razy PPO przejdzie po jednym zebranym buforze.
-
-`minibatch_size` — ile pozycji trafia jednocześnie do jednego kroku optymalizatora.
-
-## 8. Checkpointy
-
-Domyślny run tej wersji:
-
-```text
-runs/connect6_mlp_01/
-```
-
-Checkpointy:
-
-```text
-runs/connect6_mlp_01/checkpoints/
-  latest.pt
-  model_update_00000024.pt
-  model_update_00000049.pt
-  ...
-```
-
-Przy:
-
-```yaml
-resume: "auto"
-```
-
-trening automatycznie wczyta `latest.pt`.
-
-Stare checkpointy CNN nie są zgodne z tą wersją MLP.
-
-## 9. Dashboard
-
-Po rozpoczęciu treningu powstają:
-
-```text
-runs/connect6_mlp_01/metrics.csv
-runs/connect6_mlp_01/dashboard.html
-```
-
-Dashboard pokazuje m.in.:
-
-- loss;
-- policy loss;
-- value loss;
-- entropy;
-- KL;
-- win-rate czarnych i białych;
-- liczbę zakończonych partii;
-- liczbę odrzuconych pozycji;
-- szybkość self-play;
-- całkowitą przepustowość treningu.
-
-## 10. GUI
-
-Uruchamiaj przez:
+GUI, benchmark oraz model-vs-model korzystają z tego samego `network_input()`, więc pracują bezpośrednio z wejściem CNN.
 
 ```bat
 python run_gui.py
+python run_benchmark.py --config configs/train.yaml --steps 500
+python run_evaluate.py SCIEZKA_A.pt SCIEZKA_B.pt --games 100
 ```
-
-Nie przez:
-
-```bat
-python connect6/gui.py
-```
-
-ponieważ pliki w katalogu `connect6` korzystają z importów pakietowych.
-
-GUI automatycznie wyszukuje checkpointy w `runs/**/checkpoints/*.pt`.
-Możesz uruchomić:
-
-- człowiek vs człowiek;
-- człowiek vs AI;
-- AI vs AI;
-- stary checkpoint vs nowy checkpoint.
-
-Można ustawić opóźnienie ruchu AI, aby oglądać grę w normalnym tempie.

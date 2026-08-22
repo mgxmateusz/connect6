@@ -15,12 +15,7 @@ class StepBatch:
 
 
 class VectorConnect6:
-    """Wektorowe środowisko Connect6 działające bezpośrednio na GPU.
-
-    Wszystkie plansze znajdują się na jednym urządzeniu torch. Dzięki temu nie
-    trzeba uruchamiać osobnego procesu dla każdej gry ani kopiować plansz między
-    CPU i GPU przy każdej decyzji modelu.
-    """
+    """Wektorowe środowisko Connect6 działające bezpośrednio na GPU."""
 
     def __init__(
         self,
@@ -57,14 +52,10 @@ class VectorConnect6:
             self.num_envs, dtype=torch.int16, device=self.device
         )
 
-        # Stały indeks batcha jest używany przy każdym ruchu. Nie tworzymy nowego
-        # torch.arange na GPU tysiące razy podczas collectora.
         self._batch = torch.arange(
             self.num_envs, dtype=torch.long, device=self.device
         )
 
-        # Przesunięcia używane do szybkiego sprawdzania linii tylko wokół
-        # właśnie postawionego kamienia.
         k = torch.arange(
             -(self.win_length - 1), self.win_length, device=self.device
         )
@@ -80,8 +71,8 @@ class VectorConnect6:
         return self.board_size * self.board_size
 
     @property
-    def input_size(self) -> int:
-        return self.action_size * 2 + 2
+    def input_channels(self) -> int:
+        return 3
 
     def reset(self, indices: torch.Tensor | None = None) -> None:
         if indices is None:
@@ -102,17 +93,14 @@ class VectorConnect6:
         self.move_count[indices] = 0
 
     def legal_mask(self) -> torch.Tensor:
-        """Zwraca maskę wolnych pól [B, liczba_pól]."""
         return self.boards.view(self.num_envs, -1).eq(0)
 
     def network_input(self) -> torch.Tensor:
-        """Buduje zwykły wektor wejściowy MLP dla wszystkich plansz."""
         return canonical_network_input(
             self.boards, self.current_player, self.stones_left
         )
 
     def observation(self) -> torch.Tensor:
-        """Alias zachowany dla zgodności z kodem zewnętrznym."""
         return self.network_input()
 
     @torch.no_grad()
@@ -151,8 +139,6 @@ class VectorConnect6:
 
         remaining = self.stones_left - 1
         same_player = remaining.gt(0)
-
-        # Stan tur aktualizujemy tylko dla gier, które nadal trwają.
         live = ~done
         switch = live & ~same_player
         stay = live & same_player
@@ -180,8 +166,6 @@ class VectorConnect6:
         cols: torch.Tensor,
         player: torch.Tensor,
     ) -> torch.Tensor:
-        # Po broadcastingu mamy:
-        # [B, 4 kierunki, 2*win_length-1 pól wokół nowego kamienia].
         rr = rows.view(-1, 1, 1) + self._dr
         cc = cols.view(-1, 1, 1) + self._dc
         valid = (
@@ -203,9 +187,6 @@ class VectorConnect6:
         center = self._center_idx
         left_near_to_far = torch.flip(match[..., :center], dims=(-1,))
         right_near_to_far = match[..., center + 1 :]
-
-        # cumprod zamienia np. [1,1,0,1] na [1,1,0,0], więc suma liczy tylko
-        # kolejne kamienie bez przerwy, stykające się z nowym kamieniem.
         left_count = left_near_to_far.to(torch.int16).cumprod(-1).sum(-1)
         right_count = right_near_to_far.to(torch.int16).cumprod(-1).sum(-1)
         total = 1 + left_count + right_count
@@ -217,28 +198,24 @@ def canonical_network_input(
     current_player: torch.Tensor,
     stones_left: torch.Tensor,
 ) -> torch.Tensor:
-    """Tworzy jeden zwykły wektor wejściowy dla MLP.
+    """Tworzy wejście CNN [B, 3, H, W].
 
-    Dla planszy 19x19 wynik ma kształt [B, 724]:
-      0..360   = moje kamienie,
-      361..721 = kamienie przeciwnika,
-      722      = stones_left / 2,
-      723      = czy aktualny gracz jest czarny.
+    Kanały:
+      0 = moje kamienie (0/1),
+      1 = kamienie przeciwnika (0/1),
+      2 = czy ta decyzja jest ostatnim kamieniem aktualnej tury (0/1).
+
+    Kolor gracza nie jest podawany. Pozycja jest kanonizowana do relacji
+    `ja` / `przeciwnik`, więc identyczny stan strategiczny ma identyczne wejście
+    niezależnie od tego, czy aktualny gracz fizycznie jest Czarny czy Biały.
     """
     player = current_player.view(-1, 1, 1)
+    me = boards.eq(player).to(torch.float32)
+    opp = boards.eq(-player).to(torch.float32)
 
-    me = boards.eq(player).to(torch.float32).flatten(1)
-    opp = boards.eq(-player).to(torch.float32).flatten(1)
-
-    dodatkowe = torch.stack(
-        (
-            stones_left.to(torch.float32) / 2.0,
-            current_player.eq(1).to(torch.float32),
-        ),
-        dim=1,
-    )
-
-    return torch.cat((me, opp, dodatkowe), dim=1)
+    last = stones_left.eq(1).to(torch.float32).view(-1, 1, 1)
+    last = last.expand(-1, boards.shape[-2], boards.shape[-1])
+    return torch.stack((me, opp, last), dim=1)
 
 
 def canonical_observation(
@@ -246,5 +223,4 @@ def canonical_observation(
     current_player: torch.Tensor,
     stones_left: torch.Tensor,
 ) -> torch.Tensor:
-    """Alias zachowany dla zgodności z wcześniejszym kodem."""
     return canonical_network_input(boards, current_player, stones_left)

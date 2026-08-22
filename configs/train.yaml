@@ -1,9 +1,9 @@
 # =============================================================================
-# KONFIGURACJA TRENINGU CONNECT6 - CZYSTE MLP
+# KONFIGURACJA TRENINGU CONNECT6 - CNN
 # =============================================================================
 
 run:
-  name: "connect6_mlp_01"
+  name: "connect6_cnn_01"
   root_dir: "runs"
   seed: 42
 
@@ -18,46 +18,16 @@ game:
   debug_checks: false
 
 model:
-  architecture_version: 3
+  architecture_version: 4
 
-  # Dla planszy 19x19 wejście ma 724 wartości:
-  #   361 = moje kamienie
-  #   361 = kamienie przeciwnika
-  #     1 = stones_left / 2
-  #     1 = is_black
-  layers:
-    - neurons: 1024
-      norm: layer
-      activation: silu
-      dropout: 0.0
+  # Backbone zachowuje 19x19 przez cały model (stride=1, same padding).
+  # Receptive field: 23 -> 25 -> 27 -> 29 -> 31 -> 33 -> 35 -> 37.
+  kernels: [23, 3, 3, 3, 3, 3, 3, 3]
+  channels: [32, 32, 64, 64, 64, 96, 96, 96]
 
-    - neurons: 1024
-      norm: layer
-      activation: silu
-      dropout: 0.0
-
-    - neurons: 1024
-      norm: layer
-      activation: silu
-      dropout: 0.0
-
-    - neurons: 768
-      norm: layer
-      activation: silu
-      dropout: 0.0
-
-    - neurons: 512
-      norm: layer
-      activation: silu
-      dropout: 0.0
-
-  policy_layers: []
-
-  value_layers:
-    - neurons: 64
-      norm: none
-      activation: silu
-      dropout: 0.0
+  # Aktywacja backbone jest na stałe SiLU.
+  # POLICY: Conv 1x1, 96 -> 1 -> 361 logitów.
+  # VALUE:  Conv 1x1, 96 -> 1 -> global mean -> tanh.
 
   compile: false
   compile_mode: "default"  # default | reduce-overhead | max-autotune
@@ -69,7 +39,7 @@ training:
   num_envs: 8192
 
   # Faktyczny cel PPO = completed_positions_per_update * minibatch_size.
-  # 512 * 8192 = 4 194 304 terminalnych pozycji current-policy / update.
+  # Dla CNN minibatch=256 odpowiada najlepszemu zakresowi z benchmarków RTX 5070.
   completed_positions_per_update: 256
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
@@ -80,8 +50,7 @@ training:
   # --------------------------------------------------------------------------
   ppo_epochs: 3
 
-  # Duży minibatch lepiej wykorzystuje GPU i zmniejsza szum pojedynczego KL.
-  minibatch_size: 16384
+  minibatch_size: 256
 
   learning_rate: 0.0003
   lr_schedule: "cosine"     # constant | cosine
@@ -92,60 +61,35 @@ training:
   entropy_coef: 0.0125
   max_grad_norm: 1.0
 
-  # target_kl jest SOFT limitem średniej kroczącej, a nie limitem jednego
-  # przypadkowego minibatcha. Hard-stop chroni przed prawdziwym odjazdem.
-  # Minibatch powodujący stop NIE wykonuje optimizer.step().
   target_kl: 0.03
   kl_window: 32
-  kl_hard_multiplier: 2.0   # hard limit = 0.06 przy target_kl=0.03
+  kl_hard_multiplier: 2.0
 
   normalize_advantage: true
 
-  # Terminalny wynik jest cofany o gamma za każdy kamień/akcję pomiędzy
-  # zapisaną decyzją a końcem partii. Ostatni ruch ma mnożnik 1.0.
   gamma: 0.99
 
-  # ONLINE D4: każdy kolejny krok collectora zmienia widok planszy w cyklu:
-  # 0°, 90°, 180°, 270°, mirror, mirror+90°, mirror+180°, mirror+270°.
-  # Do PPO trafia dokładnie plansza i akcja widziana przez model. Dopiero akcja
-  # wysyłana do środowiska jest przeliczana z powrotem na realne współrzędne.
+  # D4 nadal ma sens dla zwykłego CNN: konwolucja daje ekwiwariancję na
+  # przesunięcia, ale nie gwarantuje ekwiwariancji na obrót i odbicie.
   symmetry_augmentation: true
 
-  # W tylu nowych partiach pierwszy kamień Czarnych jest wymuszony losowo na
-  # całej planszy. Ten ruch NIE jest decyzją policy i nigdy nie trafia do PPO.
+  # Losowe otwarcie zostaje jako eksploracja i wymuszanie różnorodności pozycji.
+  # Ruch jest wykluczony z PPO, więc model nie uczy się z wymuszonej decyzji.
   random_black_opening_fraction: 0.50
 
   # --------------------------------------------------------------------------
   # HISTORYCZNY SELF-PLAY / ANTI-FORGETTING
   # --------------------------------------------------------------------------
-  # Nadal sterujemy PROCENTEM wszystkich stołów. 0.125 = dokładnie 1/8.
   historical_fraction: 0.25
-
-  # Osobno wybieramy ile różnych checkpointów losować na update.
-  # Po wylosowaniu historyczne stoły są rozdzielane między modele możliwie równo
-  # i dane przypisanie stół -> model pozostaje stałe do końca update'u.
-  # Przy 16384 env i 12.5% history: 2048 stołów / 32 modele = 64 stoły/model.
   historical_models_per_update: 64
-
-  # Ograniczony LRU cache w zwykłym RAM. Dla obecnego MLP 256 pełnych state_dict
-  # to około 4-5 GB RAM. Po zapełnieniu najdawniej używane modele są wyrzucane.
   historical_ram_cache_models: 512
-
-  # Zamrożeni przeciwnicy nie potrzebują FP32. To dotyczy WYŁĄCZNIE inference
-  # historycznych modeli; uczony current model i jego LayerNormy nie są zmieniane.
   historical_inference_dtype: "bfloat16"   # bfloat16 | float16 | float32
 
-  # Wszystkie historyczne modele są liczone jednym grouped batched MLP na GPU.
-  # Nie ma pętli małych forwardów model-po-modelu. History ensemble liczy tylko
-  # policy, bez niepotrzebnego value head. Ruchy historii NIGDY nie trafiają do PPO.
+  # Historyczne polityki CNN są liczone grupowanymi konwolucjami na GPU.
 
   # --------------------------------------------------------------------------
   # CUDA MEMORY CACHE
   # --------------------------------------------------------------------------
-  # PyTorch trzyma zwolnione bloki VRAM w caching allocatorze. To jest dobre dla
-  # szybkości, ale Menedżer zadań/NVIDIA może pokazywać dużo więcej VRAM niż żywe
-  # tensory. Raz na 1% całego treningu bezpiecznie oddajemy WYŁĄCZNIE wolny cache
-  # do sterownika. Wartość 0 wyłącza okresowe czyszczenie.
   cuda_cache_clear_every_percent: 1.0
 
   # --------------------------------------------------------------------------
@@ -158,6 +102,5 @@ training:
   amp: true
   amp_dtype: "bfloat16"     # bfloat16 | float16
 
-  # W aktualnych testach zapis/dashboard są celowo wykonywane co każdy update.
   checkpoint_every_updates: 10
   dashboard_every_updates: 1
