@@ -533,7 +533,7 @@ def train(config_path: str | Path) -> None:
     ppo_epochs = int(tr.get("ppo_epochs", 4))
     target_kl = float(tr.get("target_kl", 0.03))
     kl_window = max(1, int(tr.get("kl_window", 32)))
-    kl_hard_multiplier = max(1.0, float(tr.get("kl_hard_multiplier", 2.0)))
+    kl_hard_multiplier = max(1.0, float(tr.get("kl_hard_multiplier", 3.0)))
     normalize_adv = bool(tr.get("normalize_advantage", True))
     checkpoint_every = max(1, int(tr.get("checkpoint_every_updates", 25)))
     dashboard_every = max(1, int(tr.get("dashboard_every_updates", 5)))
