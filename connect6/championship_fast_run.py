@@ -28,13 +28,41 @@ def _dtype_from_name(name: str) -> torch.dtype:
     return torch.float32
 
 
+def _select_backend(config_path: Path, cfg: dict):
+    ch = cfg.get("championship", cfg)
+    adaptive = ch.get("adaptive_tables", {}) or {}
+    tune = adaptive.get("backend_autotune", {}) or {}
+
+    if bool(tune.get("enabled", True)):
+        return backend_tuner.choose_backend_and_dtype(config_path, cfg)
+
+    name = str(tune.get("fixed_backend", "grouped_conv")).lower()
+    dtype_name = str(tune.get("fixed_dtype", ch.get("amp_dtype", "float16"))).lower()
+
+    if name in ("bmm", "bmm_im2col", "im2col_bmm"):
+        backend_cls = backend_tuner.BMMIndexedEnsemble
+        pretty = "BMM_IM2COL"
+    elif name in ("grouped", "grouped_conv", "conv"):
+        backend_cls = stream.DirectIndexedEnsemble
+        pretty = "GROUPED_CONV"
+    else:
+        raise ValueError(f"Nieznany fixed_backend: {name}")
+
+    if dtype_name not in ("float16", "bfloat16"):
+        raise ValueError("fixed_dtype musi być 'float16' albo 'bfloat16'")
+
+    print("\n" + "=" * 78)
+    print("CNN INFERENCE BACKEND — FIXED")
+    print("=" * 78)
+    print(f"[BACKEND FIXED] {pretty} + {dtype_name} | autotune pominięty")
+    return backend_cls, dtype_name
+
+
 def run(config_path: str | Path) -> None:
     config_path = Path(config_path).resolve()
     cfg = base._ORIGINAL_READ_YAML(config_path)
 
-    # Backend benchmark pozostaje na referencyjnym środowisku, aby wybór
-    # grouped-conv/BMM nie był mieszany z optymalizacją silnika gry.
-    backend_cls, dtype_name = backend_tuner.choose_backend_and_dtype(config_path, cfg)
+    backend_cls, dtype_name = _select_backend(config_path, cfg)
     stream.DirectIndexedEnsemble = backend_cls
 
     dtype = _dtype_from_name(dtype_name)
@@ -53,9 +81,8 @@ def run(config_path: str | Path) -> None:
         f"network dtype={dtype_name}"
     )
 
-    # Od tego miejsca wszystkie schedulery championship tworzą już wyłącznie
-    # wyspecjalizowany FastChampionshipConnect6. Treningowy VectorConnect6 nie jest
-    # zmieniany w repo ani w procesie treningowym.
+    # Championship używa wyłącznie wyspecjalizowanego silnika. Treningowy
+    # VectorConnect6 pozostaje nietknięty i checkpointy widzą identyczny input.
     _legacy.VectorConnect6 = FastChampionshipConnect6
     resident._benchmark_resident_scheduler = fast_tuner.deep_fixed_corpus_autotune
 
