@@ -33,11 +33,18 @@ def _fixed_step(
         logits = self.ensemble.forward_indexed_direct(x, actor_ids)
     chosen = _legacy._choose_actions(logits, legal, self.temperature, self.generator)
 
-    full_actions = legal_all.to(torch.int8).argmax(dim=1).to(torch.long)
+    # Inactive sloty są zamrożone przez active mask, więc nie potrzebujemy już
+    # kosztownego legal_all.to(int8).argmax(361) tylko po to, by stworzyć dummy.
+    full_actions = torch.zeros(self.tables, dtype=torch.long, device=self.device)
     full_actions.index_copy_(0, idx, chosen)
-    done, winner = base._masked_step(self.env, full_actions, self.active)
-    newly_done = self.active & done
 
+    fast_step = getattr(self.env, "masked_step", None)
+    if fast_step is not None:
+        done, winner = fast_step(full_actions, self.active)
+    else:
+        done, winner = base._masked_step(self.env, full_actions, self.active)
+
+    newly_done = self.active & done
     self.winners.copy_(torch.where(newly_done, winner, self.winners))
     self.active.logical_and_(~done)
     self._moves_since_sync += 1
@@ -52,14 +59,14 @@ stream.GlobalTableScheduler.step = _fixed_step
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="King of Connect6 — all models resident in VRAM"
+        description="King of Connect6 — fast all-resident championship"
     )
     parser.add_argument("--config", default="configs/championship.yaml")
     args = parser.parse_args()
 
-    from . import championship_resident_only
+    from . import championship_fast_run
 
-    championship_resident_only.run(args.config)
+    championship_fast_run.run(args.config)
 
 
 if __name__ == "__main__":
