@@ -1,25 +1,24 @@
 # =============================================================================
-# KING OF CONNECT6 — TRUE PARALLEL AI CHAMPIONSHIP
+# KING OF CONNECT6 — TRUE PARALLEL AI CHAMPIONSHIP — CNN
 # =============================================================================
 
 championship:
 
   # Katalog z model_update_XXXXXXXX.pt
-  checkpoint_dir: "runs/connect6_mlp_01/checkpoints"
+  checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
 
   # Wyniki: matches.csv, ranking.csv, championship.html, state.json
-  output_dir: "runs/connect6_mlp_01/championship"
+  output_dir: "runs/connect6_cnn_01/championship"
 
   # LICZBA PRAWDZIWIE RÓWNOLEGŁYCH STOŁÓW GPU.
   #
   # tables: 4 oznacza:
   # - do 4 pojedynków liczonych równolegle,
-  # - 4 różne modele-hosty są scalone do jednego BatchedPolicyEnsemble,
-  # - każda warstwa hostów jest liczona jednym torch.bmm,
-  # - challenger liczy wszystkie swoje pozycje jednym zwykłym batchem,
+  # - różne modele-hosty są liczone równolegle przez grouped convolution,
+  # - challenger liczy wszystkie swoje pozycje zwykłym batchem CNN,
   # - wagowo w VRAM podczas rundy jest około tables + 1 modeli.
   #
-  # Zwiększaj: 4 -> 8 -> 16 -> 32 i obserwuj szybkość oraz VRAM.
+  # Zwiększaj stopniowo i obserwuj szybkość oraz VRAM.
   tables: 256
 
   # Liczba partii składających się na JEDEN pojedynek dwóch modeli.
