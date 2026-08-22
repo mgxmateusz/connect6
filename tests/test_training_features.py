@@ -13,7 +13,8 @@ from connect6.train import (
     _inverse_transform_actions,
     _symmetry_for_phase,
     _temperature,
-    _transform_board_actions,
+    _transform_actions,
+    _transform_boards,
 )
 
 
@@ -84,8 +85,6 @@ def test_historical_fraction_is_split_evenly_and_colors_are_balanced():
     assert torch.all(opponent_ids[~mask] == -1)
     assert set(colors[mask].tolist()).issubset({-1, 1})
 
-    # Every old model gets its own near-50/50 color split. For odd table counts
-    # the unavoidable extra table alternates color between consecutive models.
     for model_id in range(4):
         model_mask = opponent_ids.eq(model_id)
         black = int((colors[model_mask] == 1).sum().item())
@@ -112,26 +111,19 @@ def test_historical_layout_with_fewer_models_never_drops_tables():
         device=torch.device("cpu"),
     )
 
-    # 8 requested history tables split 3/3/2. Nothing is lost or duplicated.
     assert int(mask.sum().item()) == 8
     counts = [int(opponent_ids.eq(i).sum().item()) for i in range(3)]
     assert counts == [3, 3, 2]
     assert abs(int((colors[mask] == 1).sum()) - int((colors[mask] == -1).sum())) <= 1
 
 
-def test_grouped_history_ensemble_matches_individual_models_on_cpu():
+def test_grouped_history_ensemble_matches_individual_cnn_models_on_cpu():
     torch.manual_seed(123)
-    board_size = 3
+    board_size = 5
     model_cfg = {
-        "architecture_version": 3,
-        "layers": [
-            {"neurons": 12, "norm": "layer", "activation": "silu", "dropout": 0.0},
-            {"neurons": 8, "norm": "layer", "activation": "silu", "dropout": 0.0},
-        ],
-        "policy_layers": [],
-        "value_layers": [
-            {"neurons": 4, "norm": "none", "activation": "silu", "dropout": 0.0},
-        ],
+        "architecture_version": 4,
+        "kernels": [3, 3, 3],
+        "channels": [8, 8, 16],
         "compile": False,
         "compile_mode": "default",
     }
@@ -150,7 +142,7 @@ def test_grouped_history_ensemble_matches_individual_models_on_cpu():
     ]
 
     ensemble = HistoricalPolicyEnsemble(checkpoints, torch.device("cpu"))
-    x = torch.randn(2, 5, board_size * board_size * 2 + 2)
+    x = torch.randn(2, 5, 3, board_size, board_size)
     grouped = ensemble.forward_grouped(x)
 
     for i, model in enumerate(models):
@@ -181,12 +173,8 @@ def test_online_symmetry_board_action_and_inverse_action_are_consistent():
 
     for phase in range(8):
         k, flip = _symmetry_for_phase(phase)
-        transformed_board, transformed_actions = _transform_board_actions(
-            board,
-            actions,
-            k,
-            flip,
-        )
+        transformed_board = _transform_boards(board, k, flip)
+        transformed_actions = _transform_actions(actions, 3, k, flip)
         transformed_values = transformed_board.reshape(-1)[transformed_actions]
         restored_actions = _inverse_transform_actions(
             transformed_actions,
