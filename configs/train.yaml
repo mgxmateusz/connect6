@@ -40,7 +40,7 @@ training:
 
   # Faktyczny cel PPO = completed_positions_per_update * minibatch_size.
   # Dla CNN minibatch=256 odpowiada najlepszemu zakresowi z benchmarków RTX 5070.
-  completed_positions_per_update: 1024
+  completed_positions_per_update: 768
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 10000000
