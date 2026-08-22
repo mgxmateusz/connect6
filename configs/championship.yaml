@@ -7,8 +7,6 @@ championship:
   checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
   output_dir: "runs/connect6_cnn_01/championship"
 
-  # Wartość awaryjna. Przy scheduler_autotune.enabled=true finalna liczba
-  # stołów jest dobierana automatycznie na realnym persistent schedulerze.
   tables: 128
 
   games_per_pair: 2
@@ -24,12 +22,9 @@ championship:
   adaptive_tables:
     enabled: true
 
-    # Twardy budżet lokalnego VRAM. Po przekroczeniu cache jest czyszczony,
-    # a jeśli to nie pomaga, konfiguracja jest odrzucana.
     vram_limit_gb: 11.0
     vram_check_every_forwards: 32
 
-    # Wartości startowe/fallback. Deep autotuner zastępuje je po benchmarku.
     sync_interval_moves: 8
     refill_batch: 32
     model_pool_block_size: 64
@@ -37,11 +32,6 @@ championship:
     # -------------------------------------------------------------------------
     # CNN BACKEND AUTOTUNE
     # -------------------------------------------------------------------------
-    # Najpierw porównujemy dwa sposoby liczenia wielu różnych CNN naraz:
-    # GROUPED_CONV = obecne conv2d(groups=B)
-    # BMM_IM2COL   = unfold/im2col + torch.bmm (batched GEMM / Tensor Cores)
-    # Dodatkowo benchmarkowane są BF16 i FP16. Zwycięski backend + dtype jest
-    # używany później przez cały deep scheduler autotune i właściwy turniej.
     backend_autotune:
       enabled: true
       tables: [96, 112, 128, 144]
@@ -53,7 +43,29 @@ championship:
       measure_games: 384
       max_seconds_per_test: 8.0
 
-    # Stary autotuner pozostaje jako fallback dla CPU/wyłączonego deep tunera.
+    # -------------------------------------------------------------------------
+    # ALL-RESIDENT MODE
+    # -------------------------------------------------------------------------
+    # Najpierw próbujemy załadować WSZYSTKIE checkpointy do jednego ensemble GPU.
+    # Dla obecnej liczby modeli i FP16 powinno to zajmować tylko kilka GB, więc
+    # znikają całkowicie model pools, przeładowania i końcowe drainy każdej puli.
+    # Jeżeli rzeczywisty peak przekroczy vram_limit_gb, kod sam wraca do fallbacku.
+    all_resident:
+      enabled: true
+
+    # Po udanym all-resident load stroimy już tylko właściwy runtime:
+    # tables -> refill -> sync. Nie ma model_pool_block_size, bo nie ma pul.
+    resident_autotune:
+      table_candidates: [96, 112, 120, 128, 136, 144]
+      refill_candidates: [8, 16, 24, 32, 48, 64]
+      sync_candidates: [1, 2, 4, 6, 8]
+      warmup_games: 96
+      measure_games: 768
+
+    # -------------------------------------------------------------------------
+    # POOL FALLBACK
+    # -------------------------------------------------------------------------
+    # Używany tylko, jeśli all-resident nie zmieści się w budżecie VRAM.
     min_tables: 16
     max_tables: 2048
     candidates: [16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -61,32 +73,17 @@ championship:
     benchmark_loop_moves: 8
     benchmark_model_pool: 128
 
-    # -------------------------------------------------------------------------
-    # DEEP SCHEDULER AUTOTUNE
-    # -------------------------------------------------------------------------
-    # Mierzy realny persistent scheduler i stroi kolejno:
-    # tables -> model pool block -> refill -> sync -> finalną walidację top combo.
     scheduler_autotune:
       enabled: true
-
-      # Gęsty sweep wokół dotychczasowego optimum 128.
       table_candidates: [64, 80, 96, 112, 128, 144, 160, 192, 224, 256]
-
-      # Blok modeli może być większy niż liczba stołów. Compute nadal wykonuje
-      # tylko tyle aktywnych plansz, ile jest stołów; większy blok zmniejsza
-      # liczbę przełączeń pul modeli.
       model_block_candidates: [32, 48, 64, 96, 128, 160, 192, 256]
-
       refill_candidates: [8, 16, 24, 32, 48, 64, 96]
       sync_candidates: [1, 2, 4, 6, 8, 12, 16]
-
       warmup_games: 64
       measure_games: 384
       validation_games: 768
       max_seconds_per_test: 8.0
 
-    # Następna pula checkpointów jest doczytywana do RAM w tle podczas pracy GPU.
-    # Ranking/HTML oraz log konsoli są aktualizowane okresowo, nie po każdej grze.
     progress_every_seconds: 5.0
     progress_every_matches: 500
     log_every_seconds: 1.0
