@@ -7,8 +7,8 @@ championship:
   checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
   output_dir: "runs/connect6_cnn_01/championship"
 
-  # Wartość awaryjna. Przy adaptive_tables.enabled=true liczba stołów jest
-  # dobierana automatycznie po benchmarku GPU.
+  # Wartość awaryjna. Przy scheduler_autotune.enabled=true finalna liczba
+  # stołów jest dobierana automatycznie na realnym persistent schedulerze.
   tables: 128
 
   games_per_pair: 2
@@ -25,33 +25,48 @@ championship:
     enabled: true
 
     # Twardy budżet lokalnego VRAM. Po przekroczeniu cache jest czyszczony,
-    # a jeśli to nie pomaga, rozmiar stołów zostaje trwale oznaczony jako unsafe.
+    # a jeśli to nie pomaga, konfiguracja jest odrzucana.
     vram_limit_gb: 11.0
+    vram_check_every_forwards: 32
 
+    # Wartości startowe/fallback. Deep autotuner zastępuje je po benchmarku.
+    sync_interval_moves: 8
+    refill_batch: 32
+    model_pool_block_size: 64
+
+    # Stary autotuner pozostaje jako fallback dla CPU/wyłączonego deep tunera.
     min_tables: 16
     max_tables: 2048
     candidates: [16, 32, 64, 128, 256, 512, 1024, 2048]
-
-    # Autotuner mierzy 3 workloady: HOST-HOST, CROSS i pełny game-loop.
-    # benchmark_model_pool odpowiada maksymalnej liczbie różnych modeli używanych
-    # w syntetycznym teście; nie rośnie już automatycznie razem z tables.
     benchmark_iterations: 3
     benchmark_loop_moves: 8
     benchmark_model_pool: 128
 
-    # CPU sprawdza zakończone sloty dopiero co N ruchów. Pomiędzy kontrolami
-    # zakończone stoły są zamrożone maską.
-    sync_interval_moves: 8
-    vram_check_every_forwards: 32
+    # -------------------------------------------------------------------------
+    # DEEP SCHEDULER AUTOTUNE
+    # -------------------------------------------------------------------------
+    # Mierzy realny persistent scheduler i stroi kolejno:
+    # tables -> model pool block -> refill -> sync -> finalną walidację top combo.
+    scheduler_autotune:
+      enabled: true
 
-    # Jeden globalny VectorConnect6 ma stale do `tables` slotów. Nowe gry są
-    # dokładane dopiero po uzbieraniu co najmniej tej liczby wolnych miejsc,
-    # chyba że wszystkie stoły są już puste.
-    refill_batch: 32
+      # Gęsty sweep wokół dotychczasowego optimum 128.
+      table_candidates: [64, 80, 96, 112, 128, 144, 160, 192, 224, 256]
 
-    # Modele są ładowane do GPU pulami. Dwa różne bloki oznaczają maksymalnie
-    # 2 * model_pool_block_size modeli w aktualnym ensemble.
-    model_pool_block_size: 64
+      # UWAGA: blok modeli może być większy niż liczba stołów. Compute nadal
+      # wykonuje tylko tyle grup CNN, ile jest aktywnych plansz; większy blok
+      # zmniejsza liczbę przełączeń pul modeli.
+      model_block_candidates: [32, 48, 64, 96, 128, 160, 192, 256]
+
+      refill_candidates: [8, 16, 24, 32, 48, 64, 96]
+      sync_candidates: [1, 2, 4, 6, 8, 12, 16]
+
+      # Każdy test najpierw rozgrzewa scheduler, potem mierzy rzeczywiście
+      # zakończone gry. To celowo jest dłuższe i dokładniejsze niż poprzedni test.
+      warmup_games: 64
+      measure_games: 384
+      validation_games: 768
+      max_seconds_per_test: 8.0
 
     # Następna pula checkpointów jest doczytywana do RAM w tle podczas pracy GPU.
     # Ranking/HTML oraz log konsoli są aktualizowane okresowo, nie po każdej grze.
