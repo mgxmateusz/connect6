@@ -7,8 +7,8 @@ from pathlib import Path
 import torch
 
 from . import championship_backend_tuner as backend_tuner
+from . import championship_fast_tuner as fast_tuner
 from . import championship_resident as resident
-from . import championship_resident_only as resident_only
 from . import championship_stream as stream
 from .championship_fast_env import (
     FastChampionshipConnect6,
@@ -57,7 +57,7 @@ def run(config_path: str | Path) -> None:
     # wyspecjalizowany FastChampionshipConnect6. Treningowy VectorConnect6 nie jest
     # zmieniany w repo ani w procesie treningowym.
     _legacy.VectorConnect6 = FastChampionshipConnect6
-    resident._benchmark_resident_scheduler = resident_only._deep_resident_autotune
+    resident._benchmark_resident_scheduler = fast_tuner.deep_fixed_corpus_autotune
 
     tuned_cfg = copy.deepcopy(cfg)
     ch = tuned_cfg.get("championship", tuned_cfg)
