@@ -90,7 +90,9 @@ training:
   # --------------------------------------------------------------------------
   # CUDA MEMORY CACHE
   # --------------------------------------------------------------------------
-  cuda_cache_clear_every_percent: 1.0
+  # Okresowe czyszczenie wyłączone. run_train.py czyści cache dopiero po
+  # osiągnięciu 10 GB przez torch.cuda.memory_reserved().
+  cuda_cache_clear_every_percent: 0.0
 
   # --------------------------------------------------------------------------
   # EKSPLORACJA PODCZAS SELF-PLAY
