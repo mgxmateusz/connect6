@@ -1,5 +1,5 @@
 # =============================================================================
-# KING OF CONNECT6 — PERSISTENT STREAMING CNN CHAMPIONSHIP
+# KING OF CONNECT6 — GLOBAL PERSISTENT GPU CHAMPIONSHIP — CNN
 # =============================================================================
 
 championship:
@@ -8,7 +8,7 @@ championship:
   output_dir: "runs/connect6_cnn_01/championship"
 
   # Wartość awaryjna. Przy adaptive_tables.enabled=true liczba stołów jest
-  # dobierana automatycznie po autotescie GPU.
+  # dobierana automatycznie po benchmarku GPU.
   tables: 128
 
   games_per_pair: 2
@@ -32,22 +32,29 @@ championship:
     max_tables: 2048
     candidates: [16, 32, 64, 128, 256, 512, 1024, 2048]
 
-    # Autotuner mierzy 3 osobne workloady:
-    # 1) HOST-HOST — wiele różnych CNN naraz,
-    # 2) CROSS — wiele hostów + jeden challenger batchowany na wielu planszach,
-    # 3) FULL-LOOP — wejście CNN + policy + action + krok środowiska.
+    # Autotuner mierzy 3 workloady: HOST-HOST, CROSS i pełny game-loop.
+    # benchmark_model_pool odpowiada maksymalnej liczbie różnych modeli używanych
+    # w syntetycznym teście; nie rośnie już automatycznie razem z tables.
     benchmark_iterations: 3
     benchmark_loop_moves: 8
+    benchmark_model_pool: 128
 
-    # Scheduler nie synchronizuje CPU/GPU po każdym kamieniu.
+    # CPU sprawdza zakończone sloty dopiero co N ruchów. Pomiędzy kontrolami
+    # zakończone stoły są zamrożone maską.
     sync_interval_moves: 8
     vram_check_every_forwards: 32
 
-    # Persistent streaming: gdy zbierze się co najmniej tyle wolnych miejsc,
-    # wrzucany jest kolejny cohort gier. Nie zatrzymujemy całego GPU dla jednej gry.
+    # Jeden globalny VectorConnect6 ma stale do `tables` slotów. Nowe gry są
+    # dokładane dopiero po uzbieraniu co najmniej tej liczby wolnych miejsc,
+    # chyba że wszystkie stoły są już puste.
     refill_batch: 32
 
-    # Modele są ładowane do GPU pulami i pozostają tam przez wiele pojedynków.
-    # Dla dwóch bloków naraz liczba modeli w ensemble to maks. 2 * ta wartość.
-    # Backend dodatkowo ogranicza ją tak, by nie przekroczyć aktualnej liczby stołów.
+    # Modele są ładowane do GPU pulami. Dwa różne bloki oznaczają maksymalnie
+    # 2 * model_pool_block_size modeli w aktualnym ensemble.
     model_pool_block_size: 64
+
+    # Następna pula checkpointów jest doczytywana do RAM w tle podczas pracy GPU.
+    # Ranking/HTML oraz log konsoli są aktualizowane okresowo, nie po każdej grze.
+    progress_every_seconds: 5.0
+    progress_every_matches: 500
+    log_every_seconds: 1.0
