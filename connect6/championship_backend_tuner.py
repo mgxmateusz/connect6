@@ -14,13 +14,7 @@ _legacy = stream._legacy
 
 
 class BMMIndexedEnsemble(stream.DirectIndexedEnsemble):
-    """Per-plansza CNN przez im2col + batched GEMM.
-
-    Każda aktywna plansza może używać innego modelu. Zamiast conv2d(groups=B)
-    wybieramy B zestawów wag i wykonujemy B niezależnych mnożeń macierzy jednym
-    torch.bmm. To jest workload bliższy Tensor Cores i na części GPU jest
-    znacznie szybszy od bardzo wysokiego groups w cuDNN.
-    """
+    """Per-plansza CNN przez im2col + batched GEMM."""
 
     @staticmethod
     def _indexed_conv(
@@ -70,7 +64,6 @@ def choose_backend_and_dtype(
     config_path: str | Path,
     cfg: dict[str, Any],
 ) -> tuple[type[stream.DirectIndexedEnsemble], str]:
-    """Krótki realny benchmark backendu przed głębokim tuningiem schedulera."""
     from . import championship_super_tuner as super_tuner
 
     config_path = Path(config_path).resolve()
@@ -201,17 +194,32 @@ def choose_backend_and_dtype(
 
 
 def run(config_path: str | Path) -> None:
+    from . import championship_resident
     from . import championship_super_tuner as super_tuner
 
     config_path = Path(config_path).resolve()
     cfg = base._ORIGINAL_READ_YAML(config_path)
     backend_cls, dtype_name = choose_backend_and_dtype(config_path, cfg)
 
-    # Wszystkie dalsze benchmarki i właściwy turniej korzystają już z wybranego backendu.
+    # Wszystkie dalsze ścieżki korzystają z wybranego backendu.
     stream.DirectIndexedEnsemble = backend_cls
 
-    # super_tuner.run czyta YAML ponownie, więc tymczasowo podmieniamy reader, aby
-    # zwycięski dtype trafił także do jego benchmarków bez modyfikowania pliku.
+    # Najpierw próbujemy trzymać WSZYSTKIE checkpointy w VRAM. Jeśli się mieszczą,
+    # model pools, ich drainy i przeładowania znikają całkowicie.
+    resident_cfg = copy.deepcopy(cfg)
+    resident_ch = resident_cfg.get("championship", resident_cfg)
+    resident_ch["amp_dtype"] = dtype_name
+    if championship_resident.run_resident(
+        config_path,
+        resident_cfg,
+        backend_cls=backend_cls,
+        dtype_name=dtype_name,
+    ):
+        return
+
+    print("\n[RESIDENT] fallback -> uruchamiam poolowy deep scheduler tuner\n")
+
+    # Fallback: poprzedni deep tuner model-poolowego schedulera.
     original_reader = base._ORIGINAL_READ_YAML
 
     def patched_reader(path: Path) -> dict[str, Any]:
@@ -231,7 +239,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Connect6 championship — backend + scheduler autotune"
+        description="Connect6 championship — backend + all-resident autotune"
     )
     parser.add_argument("--config", default="configs/championship.yaml")
     args = parser.parse_args()
