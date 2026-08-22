@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
-import math
+import csv
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import combinations, product
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
 from . import championship_cnn as base
 
@@ -27,26 +29,109 @@ class GameJob:
     def a_is_black(self) -> bool:
         return self.game_index % 2 == 0
 
+    @property
+    def black_slot(self) -> int:
+        return self.a_slot if self.a_is_black else self.b_slot
 
-class Cohort:
-    """Grupa gier uruchomionych jednocześnie.
+    @property
+    def white_slot(self) -> int:
+        return self.b_slot if self.a_is_black else self.a_slot
 
-    Gry w jednym cohort mają ten sam lokalny numer ruchu, więc układ modeli
-    BLACK/WHITE jest stały dla całej grupy. Po synchronizacji martwe pozycje są
-    usuwane z inference, bez przebudowywania całej puli modeli na GPU.
+
+class DirectIndexedEnsemble(base.CNNBatchedPolicyEnsemble):
+    """CNN ensemble z dowolnym model_id dla każdej planszy, bez CPU grouping.
+
+    Dla B aktywnych plansz wybieramy B kompletów wag przez index_select na GPU,
+    a następnie liczymy jedną konwolucję groups=B. Dzięki temu wszystkie gry,
+    nawet będące na różnych numerach ruchu, pozostają jednym GPU batchem.
     """
+
+    @staticmethod
+    def _indexed_conv(
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        biases: torch.Tensor | None,
+        model_ids: torch.Tensor,
+        *,
+        padding: int,
+    ) -> torch.Tensor:
+        bsz, in_channels, height, width = x.shape
+        selected_w = weights.index_select(0, model_ids)
+        out_channels = int(selected_w.shape[1])
+        kernel = int(selected_w.shape[-1])
+        selected_b = None if biases is None else biases.index_select(0, model_ids)
+
+        grouped_x = x.reshape(1, bsz * in_channels, height, width)
+        grouped_w = selected_w.reshape(bsz * out_channels, in_channels, kernel, kernel)
+        grouped_b = None if selected_b is None else selected_b.reshape(bsz * out_channels)
+        y = F.conv2d(
+            grouped_x,
+            grouped_w,
+            grouped_b,
+            stride=1,
+            padding=padding,
+            groups=bsz,
+        )
+        return y.reshape(bsz, out_channels, height, width)
+
+    def forward_indexed_direct(
+        self,
+        x: torch.Tensor,
+        model_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(f"Oczekiwano [B,C,H,W], otrzymano {tuple(x.shape)}")
+        model_ids = model_ids.to(self.device, dtype=torch.long, non_blocking=True)
+        if x.shape[0] != model_ids.numel():
+            raise ValueError("Liczba plansz i model_ids musi być identyczna.")
+        if x.shape[0] == 0:
+            return torch.empty((0, self.action_size), device=self.device)
+
+        ens = self._ensemble
+        try:
+            for kernel, weight, bias in zip(
+                ens.kernels,
+                ens.conv_weights,
+                ens.conv_biases,
+            ):
+                x = self._indexed_conv(
+                    x,
+                    weight,
+                    bias,
+                    model_ids,
+                    padding=kernel // 2,
+                )
+                x = F.silu(x)
+
+            logits = self._indexed_conv(
+                x,
+                ens.policy_weight,
+                ens.policy_bias,
+                model_ids,
+                padding=0,
+            ).squeeze(1).flatten(1)
+            self._guard_memory()
+            return logits
+        except torch.cuda.OutOfMemoryError as exc:
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            raise base.AdaptiveBatchResize("OOM podczas direct indexed CNN") from exc
+
+
+class GlobalTableScheduler:
+    """Jeden VectorConnect6 i jeden GPU forward dla wszystkich aktywnych stołów."""
 
     def __init__(
         self,
-        jobs: list[GameJob],
-        ensemble: base.CNNBatchedPolicyEnsemble,
+        tables: int,
+        ensemble: DirectIndexedEnsemble,
         *,
         temperature: float,
         amp: bool,
         amp_dtype: str,
         seed: int,
     ) -> None:
-        self.jobs = jobs
+        self.tables = int(tables)
         self.ensemble = ensemble
         self.device = ensemble.device
         self.temperature = float(temperature)
@@ -54,86 +139,97 @@ class Cohort:
         self.amp_dtype = str(amp_dtype)
         self.generator = _legacy._make_generator(self.device, seed)
         self.env = _legacy.VectorConnect6(
-            len(jobs),
+            self.tables,
             ensemble.board_size,
             ensemble.win_length,
             device=self.device,
             debug_checks=False,
         )
-        self.active = torch.ones(len(jobs), dtype=torch.bool, device=self.device)
-        self.winners = torch.zeros(len(jobs), dtype=torch.int8, device=self.device)
-        self.reported = [False] * len(jobs)
-        self.move_index = 0
-        self.active_indices = torch.arange(len(jobs), device=self.device, dtype=torch.long)
-
-        black_slots = [job.a_slot if job.a_is_black else job.b_slot for job in jobs]
-        white_slots = [job.b_slot if job.a_is_black else job.a_slot for job in jobs]
-        self.black_slots_all = torch.tensor(black_slots, device=self.device, dtype=torch.long)
-        self.white_slots_all = torch.tensor(white_slots, device=self.device, dtype=torch.long)
-        self.black_layout = ensemble.prepare_layout(self.black_slots_all)
-        self.white_layout = ensemble.prepare_layout(self.white_slots_all)
+        self.active = torch.zeros(self.tables, dtype=torch.bool, device=self.device)
+        self.winners = torch.zeros(self.tables, dtype=torch.int8, device=self.device)
+        self.black_model_ids = torch.zeros(self.tables, dtype=torch.long, device=self.device)
+        self.white_model_ids = torch.zeros(self.tables, dtype=torch.long, device=self.device)
+        self.active_indices = torch.empty(0, dtype=torch.long, device=self.device)
+        self.jobs: list[GameJob | None] = [None] * self.tables
         self._moves_since_sync = 0
 
     @property
     def active_count(self) -> int:
         return int(self.active_indices.numel())
 
-    @property
-    def finished(self) -> bool:
-        return self.active_count == 0
-
-    def _rebuild_active_layouts(self, indices_cpu: list[int]) -> None:
-        if not indices_cpu:
-            self.active_indices = torch.empty(0, dtype=torch.long, device=self.device)
+    def refill(self, slots: list[int], jobs: list[GameJob]) -> None:
+        if not slots:
             return
-        self.active_indices = torch.tensor(indices_cpu, device=self.device, dtype=torch.long)
-        black = self.black_slots_all.index_select(0, self.active_indices)
-        white = self.white_slots_all.index_select(0, self.active_indices)
-        self.black_layout = self.ensemble.prepare_layout(black)
-        self.white_layout = self.ensemble.prepare_layout(white)
+        if len(slots) != len(jobs):
+            raise ValueError("slots/jobs mismatch")
+        idx = torch.tensor(slots, dtype=torch.long, device=self.device)
+        self.env.reset(idx)
+        self.active[idx] = True
+        self.winners[idx] = 0
+        self.black_model_ids[idx] = torch.tensor(
+            [job.black_slot for job in jobs], dtype=torch.long, device=self.device
+        )
+        self.white_model_ids[idx] = torch.tensor(
+            [job.white_slot for job in jobs], dtype=torch.long, device=self.device
+        )
+        for slot, job in zip(slots, jobs):
+            self.jobs[slot] = job
+        self._rebuild_active_indices()
 
-    def sync_finished(self) -> list[tuple[GameJob, int]]:
+    def _rebuild_active_indices(self, active_cpu: list[bool] | None = None) -> None:
+        if active_cpu is None:
+            active_cpu = self.active.detach().cpu().tolist()
+        indices = [i for i, value in enumerate(active_cpu) if value]
+        self.active_indices = torch.tensor(indices, dtype=torch.long, device=self.device)
+
+    def sync(self) -> tuple[list[tuple[int, GameJob, int]], list[int]]:
         active_cpu = self.active.detach().cpu().tolist()
         winners_cpu = self.winners.detach().cpu().tolist()
-        newly_finished: list[tuple[GameJob, int]] = []
-        remaining: list[int] = []
-        for i, is_active in enumerate(active_cpu):
+        finished: list[tuple[int, GameJob, int]] = []
+        free: list[int] = []
+        for slot, is_active in enumerate(active_cpu):
             if is_active:
-                remaining.append(i)
-            elif not self.reported[i]:
-                self.reported[i] = True
-                newly_finished.append((self.jobs[i], int(winners_cpu[i])))
-        self._rebuild_active_layouts(remaining)
+                continue
+            free.append(slot)
+            job = self.jobs[slot]
+            if job is not None:
+                finished.append((slot, job, int(winners_cpu[slot])))
+                self.jobs[slot] = None
+        self._rebuild_active_indices(active_cpu)
         self._moves_since_sync = 0
-        return newly_finished
+        return finished, free
 
     @torch.inference_mode()
-    def step(self, sync_interval: int) -> list[tuple[GameJob, int]]:
-        if self.finished:
-            return []
+    def step(self, sync_interval: int) -> tuple[list[tuple[int, GameJob, int]], list[int]]:
+        if self.active_count == 0:
+            return self.sync()
 
         x_all = self.env.network_input()
         legal_all = self.env.legal_mask()
-        x = x_all.index_select(0, self.active_indices)
-        legal = legal_all.index_select(0, self.active_indices)
-        layout = self.black_layout if base._black_to_move(self.move_index) else self.white_layout
+        idx = self.active_indices
+        x = x_all.index_select(0, idx)
+        legal = legal_all.index_select(0, idx)
+
+        players = self.env.current_player.index_select(0, idx)
+        black_ids = self.black_model_ids.index_select(0, idx)
+        white_ids = self.white_model_ids.index_select(0, idx)
+        actor_ids = torch.where(players.eq(1), black_ids, white_ids)
 
         with _legacy._autocast_context(self.device, self.amp, self.amp_dtype):
-            logits = self.ensemble.forward_prepared(x, layout)
+            logits = self.ensemble.forward_indexed_direct(x, actor_ids)
         chosen = _legacy._choose_actions(logits, legal, self.temperature, self.generator)
 
         full_actions = legal_all.to(torch.int8).argmax(dim=1).to(torch.long)
-        full_actions.index_copy_(0, self.active_indices, chosen)
+        full_actions.index_copy_(0, idx, chosen)
         done, winner = base._masked_step(self.env, full_actions, self.active)
         newly_done = self.active & done
         self.winners = torch.where(newly_done, winner, self.winners)
         self.active &= ~done
-        self.move_index += 1
         self._moves_since_sync += 1
 
-        if self._moves_since_sync >= max(1, sync_interval) or self.move_index >= self.env.action_size:
-            return self.sync_finished()
-        return []
+        if self._moves_since_sync >= max(1, int(sync_interval)):
+            return self.sync()
+        return [], []
 
 
 def _gpu_timed(device: torch.device, fn) -> float:
@@ -146,6 +242,11 @@ def _gpu_timed(device: torch.device, fn) -> float:
     return max(1e-9, start.elapsed_time(end) / 1000.0)
 
 
+def _make_bench_ensemble(cp: Any, tables: int, device: torch.device, pool_models: int) -> DirectIndexedEnsemble:
+    model_count = max(2, min(int(pool_models), int(tables)))
+    return DirectIndexedEnsemble([cp] * model_count, device)
+
+
 def _bench_host_host(
     cp: Any,
     tables: int,
@@ -154,20 +255,20 @@ def _bench_host_host(
     amp: bool,
     amp_dtype: str,
     iterations: int,
+    pool_models: int,
 ) -> float:
-    ensemble = base.CNNBatchedPolicyEnsemble([cp] * tables, device)
+    ensemble = _make_bench_ensemble(cp, tables, device, pool_models)
     try:
-        ids = torch.arange(tables, device=device, dtype=torch.long)
-        layout = ensemble.prepare_layout(ids)
         x = torch.zeros((tables, 3, ensemble.board_size, ensemble.board_size), device=device)
+        ids = torch.arange(tables, device=device, dtype=torch.long).remainder(ensemble.num_models)
         with _legacy._autocast_context(device, amp, amp_dtype):
-            ensemble.forward_prepared(x, layout)
+            ensemble.forward_indexed_direct(x, ids)
         torch.cuda.synchronize(device)
 
         def work() -> None:
             with _legacy._autocast_context(device, amp, amp_dtype):
                 for _ in range(iterations):
-                    ensemble.forward_prepared(x, layout)
+                    ensemble.forward_indexed_direct(x, ids)
 
         elapsed = _gpu_timed(device, work)
         return tables * iterations / elapsed
@@ -183,29 +284,28 @@ def _bench_cross(
     amp: bool,
     amp_dtype: str,
     iterations: int,
+    pool_models: int,
 ) -> float:
-    hosts = base.CNNBatchedPolicyEnsemble([cp] * tables, device)
-    challenger = base.CNNBatchedPolicyEnsemble([cp], device)
+    ensemble = _make_bench_ensemble(cp, tables, device, pool_models)
     try:
-        ids = torch.arange(tables, device=device, dtype=torch.long)
-        layout = hosts.prepare_layout(ids)
-        x = torch.zeros((tables, 3, hosts.board_size, hosts.board_size), device=device)
+        x = torch.zeros((tables, 3, ensemble.board_size, ensemble.board_size), device=device)
+        mixed = torch.arange(tables, device=device, dtype=torch.long).remainder(ensemble.num_models)
+        same = torch.zeros(tables, device=device, dtype=torch.long)
         with _legacy._autocast_context(device, amp, amp_dtype):
-            hosts.forward_prepared(x, layout)
-            challenger.forward_single_model(x, 0)
+            ensemble.forward_indexed_direct(x, mixed)
+            ensemble.forward_single_model(x, 0)
         torch.cuda.synchronize(device)
 
         def work() -> None:
             with _legacy._autocast_context(device, amp, amp_dtype):
                 for _ in range(iterations):
-                    hosts.forward_prepared(x, layout)
-                    challenger.forward_single_model(x, 0)
+                    ensemble.forward_indexed_direct(x, mixed)
+                    ensemble.forward_single_model(x, 0)
 
         elapsed = _gpu_timed(device, work)
         return 2 * tables * iterations / elapsed
     finally:
-        challenger.release()
-        hosts.release()
+        ensemble.release()
 
 
 def _bench_full_loop(
@@ -216,11 +316,10 @@ def _bench_full_loop(
     amp: bool,
     amp_dtype: str,
     moves: int,
+    pool_models: int,
 ) -> float:
-    ensemble = base.CNNBatchedPolicyEnsemble([cp] * tables, device)
+    ensemble = _make_bench_ensemble(cp, tables, device, pool_models)
     try:
-        ids = torch.arange(tables, device=device, dtype=torch.long)
-        layout = ensemble.prepare_layout(ids)
         env = _legacy.VectorConnect6(
             tables,
             ensemble.board_size,
@@ -228,22 +327,25 @@ def _bench_full_loop(
             device=device,
             debug_checks=False,
         )
+        black = torch.arange(tables, device=device, dtype=torch.long).remainder(ensemble.num_models)
+        white = torch.flip(black, dims=(0,))
         generator = _legacy._make_generator(device, 987654)
+
+        x = env.network_input()
+        with _legacy._autocast_context(device, amp, amp_dtype):
+            ensemble.forward_indexed_direct(x, black)
+        torch.cuda.synchronize(device)
 
         def work() -> None:
             for _ in range(moves):
                 x = env.network_input()
                 legal = env.legal_mask()
+                actor_ids = torch.where(env.current_player.eq(1), black, white)
                 with _legacy._autocast_context(device, amp, amp_dtype):
-                    logits = ensemble.forward_prepared(x, layout)
+                    logits = ensemble.forward_indexed_direct(x, actor_ids)
                 actions = _legacy._choose_actions(logits, legal, 0.0, generator)
                 env.step(actions)
 
-        # warm-up na osobnym env, aby właściwy pomiar zaczynał się po inicjalizacji cuDNN
-        x = env.network_input()
-        with _legacy._autocast_context(device, amp, amp_dtype):
-            ensemble.forward_prepared(x, layout)
-        torch.cuda.synchronize(device)
         elapsed = _gpu_timed(device, work)
         return tables * moves / elapsed
     finally:
@@ -251,10 +353,8 @@ def _bench_full_loop(
 
 
 def _harmonic_score(hh: float, cross: float, loop: float) -> float:
-    # Pełny loop ma największą wagę; harmoniczna karze ustawienie słabe w jednym trybie.
     weights = ((0.20, hh), (0.25, cross), (0.55, loop))
-    denom = sum(w / max(rate, 1e-9) for w, rate in weights)
-    return 1.0 / denom
+    return 1.0 / sum(w / max(rate, 1e-9) for w, rate in weights)
 
 
 def autotune_three_tests(
@@ -271,11 +371,8 @@ def autotune_three_tests(
     if device.type != "cuda":
         fixed = min(len(refs), int(ch.get("tables", 4)))
         controller = base.AdaptiveTableController(
-            output_dir / "adaptive_tables.json",
-            gpu_name="CPU",
-            limit_bytes=1,
-            min_tables=2,
-            max_tables=max(2, fixed),
+            output_dir / "adaptive_tables.json", gpu_name="CPU", limit_bytes=1,
+            min_tables=2, max_tables=max(2, fixed),
         )
         return fixed, controller, [fixed]
 
@@ -296,10 +393,11 @@ def autotune_three_tests(
     amp_dtype = str(ch.get("amp_dtype", "bfloat16"))
     iterations = max(2, int(adaptive.get("benchmark_iterations", 3)))
     loop_moves = max(4, int(adaptive.get("benchmark_loop_moves", 8)))
+    pool_models = max(2, int(adaptive.get("benchmark_model_pool", 128)))
 
     base._VRAM_LIMIT_BYTES = limit_bytes
     print("\n[ADAPTIVE GPU] autotest 3-trybowy: HOST-HOST / CROSS / FULL-LOOP")
-    print(f"GPU: {gpu_name} | limit VRAM: {limit_gb:.2f} GB")
+    print(f"GPU: {gpu_name} | limit VRAM: {limit_gb:.2f} GB | benchmark pool: {pool_models} modeli")
     best_tables: int | None = None
     best_score = -1.0
 
@@ -310,9 +408,12 @@ def autotune_three_tests(
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         try:
-            hh = _bench_host_host(cp, tables, device=device, amp=amp, amp_dtype=amp_dtype, iterations=iterations)
-            cross = _bench_cross(cp, tables, device=device, amp=amp, amp_dtype=amp_dtype, iterations=iterations)
-            loop = _bench_full_loop(cp, tables, device=device, amp=amp, amp_dtype=amp_dtype, moves=loop_moves)
+            hh = _bench_host_host(cp, tables, device=device, amp=amp, amp_dtype=amp_dtype,
+                                  iterations=iterations, pool_models=pool_models)
+            cross = _bench_cross(cp, tables, device=device, amp=amp, amp_dtype=amp_dtype,
+                                 iterations=iterations, pool_models=pool_models)
+            loop = _bench_full_loop(cp, tables, device=device, amp=amp, amp_dtype=amp_dtype,
+                                    moves=loop_moves, pool_models=pool_models)
             peak = torch.cuda.max_memory_reserved(device)
             if peak > limit_bytes:
                 raise base.AdaptiveBatchResize(
@@ -326,16 +427,12 @@ def autotune_three_tests(
 
         score = _harmonic_score(hh, cross, loop)
         controller.benchmarks[tables] = {
-            "host_host_dps": hh,
-            "cross_dps": cross,
-            "full_loop_dps": loop,
-            "score": score,
-            "peak_vram_gb": peak / 2**30,
+            "host_host_dps": hh, "cross_dps": cross, "full_loop_dps": loop,
+            "score": score, "peak_vram_gb": peak / 2**30,
         }
         print(
-            f"[AUTOTUNE] {tables:>4} | HH {hh:>9,.0f} d/s | "
-            f"CROSS {cross:>9,.0f} d/s | LOOP {loop:>9,.0f} d/s | "
-            f"score {score:>9,.0f} | VRAM {peak / 2**30:.2f} GB"
+            f"[AUTOTUNE] {tables:>4} | HH {hh:>9,.0f} d/s | CROSS {cross:>9,.0f} d/s | "
+            f"LOOP {loop:>9,.0f} d/s | score {score:>9,.0f} | VRAM {peak / 2**30:.2f} GB"
         )
         if score > best_score:
             best_score = score
@@ -363,13 +460,8 @@ def _update_counter(counter: dict[str, int], winner: int, *, a_is_black: bool) -
 
 
 def _pair_jobs(
-    left: list[Any],
-    right: list[Any],
-    *,
-    same_block: bool,
-    games_per_pair: int,
-    completed: set[str],
-    slot_of: dict[str, int],
+    left: list[Any], right: list[Any], *, same_block: bool,
+    games_per_pair: int, completed: set[str], slot_of: dict[str, int],
 ) -> list[GameJob]:
     pairs = combinations(left, 2) if same_block else product(left, right)
     jobs: list[GameJob] = []
@@ -377,44 +469,55 @@ def _pair_jobs(
         if _legacy._pair_id(a, b) in completed:
             continue
         for game_index in range(games_per_pair):
-            jobs.append(
-                GameJob(
-                    a=a,
-                    b=b,
-                    game_index=game_index,
-                    a_slot=slot_of[a.name],
-                    b_slot=slot_of[b.name],
-                )
-            )
+            jobs.append(GameJob(a, b, game_index, slot_of[a.name], slot_of[b.name]))
     return jobs
 
 
+def _append_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    new_file = not path.exists() or path.stat().st_size == 0
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_legacy.MATCH_FIELDS)
+        if new_file:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in _legacy.MATCH_FIELDS})
+        handle.flush()
+
+
 def _write_progress(
-    *,
-    checkpoints: list[Any],
-    match_rows: list[dict[str, Any]],
-    completed_ids: set[str],
-    total_pairs: int,
-    ranking_path: Path,
-    html_path: Path,
-    games_per_pair: int,
-    tables: int,
-    temperature: float,
+    checkpoints: list[Any], match_rows: list[dict[str, Any]], completed_ids: set[str],
+    total_pairs: int, ranking_path: Path, html_path: Path, games_per_pair: int,
+    tables: int, temperature: float,
 ) -> list[dict[str, Any]]:
     ranking = _legacy.build_ranking(checkpoints, match_rows)
     _legacy.write_ranking_csv(ranking_path, ranking)
     _legacy.write_html(
-        html_path,
-        ranking,
-        completed_pairs=len(completed_ids),
-        total_pairs=total_pairs,
-        checkpoint_count=len(checkpoints),
-        games_per_pair=games_per_pair,
-        tables=tables,
-        temperature=temperature,
-        running=len(completed_ids) < total_pairs,
+        html_path, ranking, completed_pairs=len(completed_ids), total_pairs=total_pairs,
+        checkpoint_count=len(checkpoints), games_per_pair=games_per_pair,
+        tables=tables, temperature=temperature, running=len(completed_ids) < total_pairs,
     )
     return ranking
+
+
+def _build_pool_specs(blocks: list[list[Any]]) -> list[tuple[int, int, list[Any], list[Any], bool]]:
+    specs: list[tuple[int, int, list[Any], list[Any], bool]] = []
+    for bi, left in enumerate(blocks):
+        for bj in range(bi, len(blocks)):
+            specs.append((bi, bj, left, blocks[bj], bi == bj))
+    return specs
+
+
+def _unique_refs(left: list[Any], right: list[Any], same: bool) -> list[Any]:
+    refs = left if same else left + right
+    out: list[Any] = []
+    seen: set[str] = set()
+    for ref in refs:
+        if ref.name not in seen:
+            seen.add(ref.name)
+            out.append(ref)
+    return out
 
 
 def run_streaming_once(
@@ -440,173 +543,161 @@ def run_streaming_once(
     seed = int(ch.get("seed", 12345))
     sync_interval = max(1, int(adaptive.get("sync_interval_moves", 8)))
     refill_batch = max(1, min(tables, int(adaptive.get("refill_batch", 32))))
-    block_default = min(128, max(16, tables // 2))
-    model_block_size = max(2, int(adaptive.get("model_pool_block_size", block_default)))
-    model_block_size = min(model_block_size, max(2, tables // 2))
+    model_block_size = max(2, int(adaptive.get("model_pool_block_size", 64)))
+    model_block_size = min(model_block_size, max(2, len(checkpoints)))
+    progress_seconds = max(1.0, float(adaptive.get("progress_every_seconds", 5.0)))
+    progress_matches = max(1, int(adaptive.get("progress_every_matches", 500)))
+    log_seconds = max(0.25, float(adaptive.get("log_every_seconds", 1.0)))
 
     matches_path = output_dir / "matches.csv"
     ranking_path = output_dir / "ranking.csv"
     html_path = output_dir / "championship.html"
     state_path = output_dir / "state.json"
     _legacy._validate_or_create_state(
-        state_path,
-        checkpoints=checkpoints,
-        games_per_pair=games_per_pair,
-        temperature=temperature,
+        state_path, checkpoints=checkpoints,
+        games_per_pair=games_per_pair, temperature=temperature,
     )
     completed_ids, match_rows = _legacy._load_completed_matches(matches_path)
     total_pairs = len(checkpoints) * (len(checkpoints) - 1) // 2
     ranking = _write_progress(
-        checkpoints=checkpoints,
-        match_rows=match_rows,
-        completed_ids=completed_ids,
-        total_pairs=total_pairs,
-        ranking_path=ranking_path,
-        html_path=html_path,
-        games_per_pair=games_per_pair,
-        tables=tables,
-        temperature=temperature,
+        checkpoints, match_rows, completed_ids, total_pairs, ranking_path, html_path,
+        games_per_pair, tables, temperature,
     )
 
     device = _legacy._torch_device(str(ch.get("device", "cuda")))
     base._VRAM_LIMIT_BYTES = controller.limit_bytes if device.type == "cuda" else 0
     store = base.CNNCheckpointStore(cpu_cache_models=cpu_cache_models)
     blocks = [checkpoints[i : i + model_block_size] for i in range(0, len(checkpoints), model_block_size)]
+    specs = _build_pool_specs(blocks)
 
     print("=" * 78)
-    print("KING OF CONNECT6 — PERSISTENT STREAMING CHAMPIONSHIP")
+    print("KING OF CONNECT6 — GLOBAL PERSISTENT GPU STREAM")
     print("=" * 78)
     print(f"Stoły: {tables} | refill batch: {refill_batch} | model block: {model_block_size}")
-    print(f"Synchronizacja scheduler-a: co {sync_interval} ruchów/cohort")
+    print(f"Jeden VectorConnect6 + jeden CNN forward dla wszystkich aktywnych stołów")
+    print(f"Synchronizacja CPU scheduler-a: co {sync_interval} ruchów")
     print(f"Pary: {len(completed_ids):,}/{total_pairs:,} ukończone")
 
     pair_counters: dict[str, dict[str, int]] = {}
     pair_refs: dict[str, tuple[Any, Any]] = {}
     started_at = time.perf_counter()
     finished_games_total = 0
+    last_progress = time.perf_counter()
+    last_progress_matches = len(completed_ids)
+    last_log = 0.0
 
-    for bi, left in enumerate(blocks):
-        for bj in range(bi, len(blocks)):
-            right = blocks[bj]
-            same = bi == bj
-            pool_refs = left if same else left + right
-            # Usuwamy duplikaty zachowując kolejność.
-            unique: list[Any] = []
-            seen: set[str] = set()
-            for ref in pool_refs:
-                if ref.name not in seen:
-                    seen.add(ref.name)
-                    unique.append(ref)
+    def load_unique(refs: list[Any]) -> list[Any]:
+        return [store.get(ref) for ref in refs]
 
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkpoint-prefetch") as executor:
+        prefetched: Future[list[Any]] | None = None
+        prefetched_index = -1
+
+        for spec_index, (bi, bj, left, right, same) in enumerate(specs):
+            unique = _unique_refs(left, right, same)
             slot_of = {ref.name: i for i, ref in enumerate(unique)}
             jobs = _pair_jobs(
-                left,
-                right,
-                same_block=same,
-                games_per_pair=games_per_pair,
-                completed=completed_ids,
-                slot_of=slot_of,
+                left, right, same_block=same, games_per_pair=games_per_pair,
+                completed=completed_ids, slot_of=slot_of,
             )
             if not jobs:
                 continue
 
+            if prefetched is not None and prefetched_index == spec_index:
+                lean = prefetched.result()
+                prefetched = None
+            else:
+                lean = load_unique(unique)
+
+            # Prefetch następnej faktycznie istniejącej puli do RAM podczas pracy GPU.
+            for ni in range(spec_index + 1, len(specs)):
+                nbi, nbj, nleft, nright, nsame = specs[ni]
+                nunique = _unique_refs(nleft, nright, nsame)
+                nslot = {ref.name: i for i, ref in enumerate(nunique)}
+                njobs = _pair_jobs(
+                    nleft, nright, same_block=nsame, games_per_pair=games_per_pair,
+                    completed=completed_ids, slot_of=nslot,
+                )
+                if njobs:
+                    prefetched = executor.submit(load_unique, nunique)
+                    prefetched_index = ni
+                    break
+
             print(
                 f"\n[MODEL POOL] bloki {bi + 1}/{bj + 1} | modele={len(unique)} | "
-                f"gry do wykonania={len(jobs)}"
+                f"gry={len(jobs)}"
             )
-            lean = [store.get(ref) for ref in unique]
-            ensemble = base.CNNBatchedPolicyEnsemble(lean, device)
+            ensemble = DirectIndexedEnsemble(lean, device)
+            scheduler = GlobalTableScheduler(
+                tables, ensemble, temperature=temperature, amp=amp,
+                amp_dtype=amp_dtype, seed=seed + spec_index,
+            )
             pending = 0
-            cohorts: list[Cohort] = []
 
-            def add_cohort(count: int) -> None:
-                nonlocal pending
-                if count <= 0 or pending >= len(jobs):
-                    return
-                batch = jobs[pending : pending + count]
-                pending += len(batch)
-                cohorts.append(
-                    Cohort(
-                        batch,
-                        ensemble,
-                        temperature=temperature,
-                        amp=amp,
-                        amp_dtype=amp_dtype,
-                        seed=seed + pending + finished_games_total,
-                    )
-                )
-
-            add_cohort(min(tables, len(jobs)))
+            initial = min(tables, len(jobs))
+            scheduler.refill(list(range(initial)), jobs[:initial])
+            pending = initial
 
             try:
-                while cohorts:
-                    newly: list[tuple[GameJob, int]] = []
-                    for cohort in list(cohorts):
-                        newly.extend(cohort.step(sync_interval))
+                while scheduler.active_count > 0 or pending < len(jobs):
+                    finished, free = scheduler.step(sync_interval)
+                    completed_rows: list[dict[str, Any]] = []
 
-                    if newly:
-                        finished_games_total += len(newly)
-                        for job, winner in newly:
-                            pid = _legacy._pair_id(job.a, job.b)
-                            counter = pair_counters.setdefault(pid, _legacy._empty_counter())
-                            pair_refs[pid] = (job.a, job.b)
-                            _update_counter(counter, winner, a_is_black=job.a_is_black)
-                            games_done = counter["a_game_wins"] + counter["b_game_wins"] + counter["draws"]
-                            if games_done == games_per_pair:
-                                row = _legacy._finalize_pair_rows(
-                                    [pair_refs[pid]], [counter], games_per_pair
-                                )[0]
-                                row["elapsed_seconds"] = 0.0
-                                _legacy._append_match(matches_path, row)
-                                completed_ids.add(pid)
-                                match_rows.append(row)
-                                del pair_counters[pid]
-                                del pair_refs[pid]
+                    for _slot, job, winner in finished:
+                        finished_games_total += 1
+                        pid = _legacy._pair_id(job.a, job.b)
+                        counter = pair_counters.setdefault(pid, _legacy._empty_counter())
+                        pair_refs[pid] = (job.a, job.b)
+                        _update_counter(counter, winner, a_is_black=job.a_is_black)
+                        games_done = counter["a_game_wins"] + counter["b_game_wins"] + counter["draws"]
+                        if games_done == games_per_pair:
+                            row = _legacy._finalize_pair_rows([pair_refs[pid]], [counter], games_per_pair)[0]
+                            row["elapsed_seconds"] = 0.0
+                            completed_rows.append(row)
+                            completed_ids.add(pid)
+                            match_rows.append(row)
+                            del pair_counters[pid]
+                            del pair_refs[pid]
 
-                        ranking = _write_progress(
-                            checkpoints=checkpoints,
-                            match_rows=match_rows,
-                            completed_ids=completed_ids,
-                            total_pairs=total_pairs,
-                            ranking_path=ranking_path,
-                            html_path=html_path,
-                            games_per_pair=games_per_pair,
-                            tables=tables,
-                            temperature=temperature,
-                        )
+                    _append_rows(matches_path, completed_rows)
 
-                    cohorts = [c for c in cohorts if not c.finished]
-                    active_now = sum(c.active_count for c in cohorts)
-                    free = tables - active_now
                     remaining = len(jobs) - pending
+                    if remaining > 0 and (len(free) >= refill_batch or scheduler.active_count == 0):
+                        count = min(len(free), remaining)
+                        if count > 0:
+                            new_jobs = jobs[pending : pending + count]
+                            scheduler.refill(free[:count], new_jobs)
+                            pending += count
 
-                    if remaining > 0 and (free >= refill_batch or not cohorts):
-                        refill = min(free, remaining)
-                        if refill > 0:
-                            add_cohort(refill)
-
-                    if newly:
-                        elapsed = max(1e-9, time.perf_counter() - started_at)
-                        print(
-                            f"[STREAM] aktywne {sum(c.active_count for c in cohorts):>4}/{tables} | "
-                            f"cohorty={len(cohorts)} | refill_free={tables - sum(c.active_count for c in cohorts):>3} | "
-                            f"gry/s={finished_games_total / elapsed:.2f} | "
-                            f"VRAM {_legacy._vram_label(device)}"
+                    now = time.perf_counter()
+                    if (
+                        now - last_progress >= progress_seconds
+                        or len(completed_ids) - last_progress_matches >= progress_matches
+                    ):
+                        ranking = _write_progress(
+                            checkpoints, match_rows, completed_ids, total_pairs,
+                            ranking_path, html_path, games_per_pair, tables, temperature,
                         )
+                        last_progress = now
+                        last_progress_matches = len(completed_ids)
+
+                    if finished and now - last_log >= log_seconds:
+                        elapsed = max(1e-9, now - started_at)
+                        print(
+                            f"[STREAM] aktywne {scheduler.active_count:>4}/{tables} | "
+                            f"free={tables - scheduler.active_count:>3} | "
+                            f"gry/s={finished_games_total / elapsed:.2f} | "
+                            f"pary={len(completed_ids):,}/{total_pairs:,} | "
+                            f"{_legacy._vram_label(device)}"
+                        )
+                        last_log = now
             finally:
                 ensemble.release()
                 del ensemble
 
     ranking = _write_progress(
-        checkpoints=checkpoints,
-        match_rows=match_rows,
-        completed_ids=completed_ids,
-        total_pairs=total_pairs,
-        ranking_path=ranking_path,
-        html_path=html_path,
-        games_per_pair=games_per_pair,
-        tables=tables,
-        temperature=temperature,
+        checkpoints, match_rows, completed_ids, total_pairs, ranking_path, html_path,
+        games_per_pair, tables, temperature,
     )
     print("\n" + "=" * 78)
     print("MISTRZOSTWA ZAKOŃCZONE")
@@ -635,7 +726,7 @@ def run(config_path: str | Path) -> None:
             if new_tables >= selected or selected <= controller.min_tables:
                 raise
             print(
-                f"\n[ADAPTIVE GPU] {selected} stołów przekroczyło bezpieczny budżet: {exc}. "
+                f"\n[ADAPTIVE GPU] {selected} stołów przekroczyło budżet: {exc}. "
                 f"Zapamiętuję i wznawiam z {new_tables}.\n"
             )
             selected = new_tables
@@ -644,7 +735,7 @@ def run(config_path: str | Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="King of Connect6 — persistent streaming CNN championship"
+        description="King of Connect6 — global persistent streaming CNN championship"
     )
     parser.add_argument("--config", default="configs/championship.yaml")
     args = parser.parse_args()
