@@ -7,7 +7,9 @@ championship:
   checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
   output_dir: "runs/connect6_cnn_01/championship"
 
-  tables: 128
+  # FINALNE USTAWIENIA RUNTIME.
+  # Po jednorazowym benchmarku wpisz tutaj zwycięskie wartości.
+  tables: 384
 
   games_per_pair: 2
   temperature: 0.0
@@ -20,47 +22,31 @@ championship:
   seed: 12345
 
   adaptive_tables:
-    enabled: true
-
-    # Wszystkie checkpointy siedzą jednocześnie w VRAM. Nie ma model pools.
+    # Normalny championship NIE wykonuje autotuningu.
+    # Backend jest na stałe BMM_IM2COL + FP16.
     vram_limit_gb: 11.0
     vram_check_every_forwards: 32
 
-    # Wartości bazowe przed autotuningiem.
+    # FINALNE USTAWIENIA RUNTIME.
     sync_interval_moves: 1
     refill_batch: 32
-
-    # -------------------------------------------------------------------------
-    # CNN BACKEND — ZAMROŻONY PO BENCHMARKU
-    # -------------------------------------------------------------------------
-    # BMM_IM2COL skaluje się znacznie lepiej z dużymi batchami; jego maksimum
-    # w sweepie 64..512 przypadło na 384 stoły. Nie benchmarkujemy backendu
-    # przy każdym starcie.
-    backend_autotune:
-      enabled: false
-      fixed_backend: "bmm_im2col"
-      fixed_dtype: "float16"
-
-    # -------------------------------------------------------------------------
-    # ALL-RESIDENT MODE — JEDYNA ŚCIEŻKA TURNIEJU
-    # -------------------------------------------------------------------------
-    all_resident:
-      enabled: true
-
-    # -------------------------------------------------------------------------
-    # FAST ENGINE + FIXED-CORPUS AUTOTUNE
-    # -------------------------------------------------------------------------
-    # Każda konfiguracja tables/refill/sync rozgrywa dokładnie ten sam zamknięty
-    # zestaw gier. Dzięki temu różna długość partii nie fałszuje benchmarku.
-    resident_autotune:
-      table_candidates: [64, 128, 192, 256, 320, 384, 448, 512]
-      refill_candidates: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
-      sync_candidates: [1, 2, 4, 6, 8]
-
-      fixed_warmup_games: 256
-      fixed_measure_games: 1024
-      fixed_validation_games: 2048
 
     progress_every_seconds: 5.0
     progress_every_matches: 500
     log_every_seconds: 1.0
+
+  # -------------------------------------------------------------------------
+  # JEDNORAZOWY BENCHMARK
+  # -------------------------------------------------------------------------
+  # Ta sekcja jest używana WYŁĄCZNIE przez:
+  #   python run_championship_benchmark.py
+  # Normalny run_championship.py całkowicie ją ignoruje.
+  benchmark:
+    table_candidates: [64, 128, 192, 256, 320, 384, 448, 512]
+    refill_candidates: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
+    sync_candidates: [1, 2, 4, 6, 8]
+
+    # Każda konfiguracja dostaje ten sam corpus gier.
+    warmup_games: 256
+    measure_games: 1024
+    validation_games: 2048
