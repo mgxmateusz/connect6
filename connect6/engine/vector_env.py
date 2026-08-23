@@ -72,7 +72,7 @@ class VectorConnect6:
 
     @property
     def input_channels(self) -> int:
-        return 3
+        return 4
 
     def reset(self, indices: torch.Tensor | None = None) -> None:
         if indices is None:
@@ -198,24 +198,28 @@ def canonical_network_input(
     current_player: torch.Tensor,
     stones_left: torch.Tensor,
 ) -> torch.Tensor:
-    """Tworzy wejście CNN [B, 3, H, W].
+    """Tworzy wejście CNN [B, 4, H, W].
 
     Kanały:
       0 = moje kamienie (0/1),
       1 = kamienie przeciwnika (0/1),
-      2 = czy ta decyzja jest ostatnim kamieniem aktualnej tury (0/1).
+      2 = maska prawdziwej planszy (1 na planszy; zero-padding tworzy obszar poza nią),
+      3 = czy ta decyzja jest ostatnim kamieniem aktualnej tury (0/1).
 
     Kolor gracza nie jest podawany. Pozycja jest kanonizowana do relacji
     `ja` / `przeciwnik`, więc identyczny stan strategiczny ma identyczne wejście
     niezależnie od tego, czy aktualny gracz fizycznie jest Czarny czy Biały.
+    Kanał maski planszy pozwala konwolucji odróżnić puste pole od zerowego
+    paddingu poza krawędzią planszy.
     """
     player = current_player.view(-1, 1, 1)
     me = boards.eq(player).to(torch.float32)
     opp = boards.eq(-player).to(torch.float32)
+    board_mask = torch.ones_like(me)
 
     last = stones_left.eq(1).to(torch.float32).view(-1, 1, 1)
     last = last.expand(-1, boards.shape[-2], boards.shape[-1])
-    return torch.stack((me, opp, last), dim=1)
+    return torch.stack((me, opp, board_mask, last), dim=1)
 
 
 def canonical_observation(
