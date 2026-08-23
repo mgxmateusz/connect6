@@ -1,52 +1,11 @@
-# =============================================================================
-# KING OF CONNECT6 — FAST ALL-RESIDENT GPU CHAMPIONSHIP — CNN
-# =============================================================================
-
 championship:
-
   checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
   output_dir: "runs/connect6_cnn_01/championship"
-
-  # FINALNE USTAWIENIA RUNTIME.
-  # Po jednorazowym benchmarku wpisz tutaj zwycięskie wartości.
-  tables: 384
-
   games_per_pair: 2
   temperature: 0.0
   device: "cuda"
-  amp: true
-  amp_dtype: "float16"
 
-  cpu_cache_models: 16384
-  empty_cache_after_unload: false
-  seed: 12345
-
-  adaptive_tables:
-    # Normalny championship NIE wykonuje autotuningu.
-    # Backend jest na stałe BMM_IM2COL + FP16.
-    vram_limit_gb: 11.0
-    vram_check_every_forwards: 32
-
-    # FINALNE USTAWIENIA RUNTIME.
-    sync_interval_moves: 1
-    refill_batch: 32
-
-    progress_every_seconds: 5.0
-    progress_every_matches: 500
-    log_every_seconds: 1.0
-
-  # -------------------------------------------------------------------------
-  # JEDNORAZOWY BENCHMARK
-  # -------------------------------------------------------------------------
-  # Ta sekcja jest używana WYŁĄCZNIE przez:
-  #   python run_championship_benchmark.py
-  # Normalny run_championship.py całkowicie ją ignoruje.
-  benchmark:
-    table_candidates: [64, 128, 192, 256, 320, 384, 448, 512]
-    refill_candidates: [8, 16, 24, 32, 48, 64, 96, 128, 192, 256]
-    sync_candidates: [1, 2, 4, 6, 8]
-
-    # Każda konfiguracja dostaje ten sam corpus gier.
-    warmup_games: 256
-    measure_games: 1024
-    validation_games: 2048
+  native_gpu:
+    slots: 4096
+    load_chunk_models: 32
+    compile_verbose: true
