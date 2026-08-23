@@ -8,7 +8,7 @@
 1 - ostatni ruch / 0 - nieostatni ruch
 
 
-3. Walki przeciwko historycznym:
+3. Walki przeciwko historycznym (1/4 stołów):
 50% - losujemy ze wszystkich checkpointów
 25% - losujemy z ostatnich 50% checkpointów
 25% - losujemy z ostatnich 25% checkpointów
@@ -22,7 +22,7 @@
 5. Zmienić silnik gry by zbieranie doświadczeń odbywało się na gpu, podobnie jak w championsach, ale ogólna poprawa wydajności procesu uczenia.
 
 
-6. Dodać kilka stołów by grało przeciwko prostemu botowi, bot ma działać normalnie na GPU, nie być uczącym się modelem. Prosty matematyczny i regularny bot, dla kazdeog legalnego pola liczy coś a pozniej argmax(score[361])
-
+6. Walka przeciwko botowi (1/8 stołów)
+Dodać kilka stołów by grało przeciwko prostemu botowi, bot ma działać normalnie na GPU, nie być uczącym się modelem. Prosty matematyczny i regularny bot. Deterministyczny evaluator 361 pól, nie jako klasyczne drzewko decyzyjne. Musi być bardzo GPU friendly.
 
 7. 
