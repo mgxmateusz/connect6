@@ -51,7 +51,11 @@ __device__ __forceinline__ int contiguous_after(
     return total;
 }
 
-__device__ __forceinline__ int score_cell(
+// -----------------------------------------------------------------------------
+// V1 - original one-pass tactical scorer. Kept unchanged so arena results remain
+// directly comparable after V2 is introduced.
+// -----------------------------------------------------------------------------
+__device__ __forceinline__ int score_cell_v1(
     const int8_t* board,
     int action,
     int8_t player,
@@ -192,6 +196,268 @@ __device__ __forceinline__ int score_cell(
     return quiet_score;
 }
 
+// -----------------------------------------------------------------------------
+// V2 - still one stateless score per candidate, but with Connect6-aware threat
+// quality. It distinguishes actual finishing cells, multi-direction forks and
+// compact/broken six-cell patterns instead of relying mostly on raw counts.
+// -----------------------------------------------------------------------------
+__device__ __forceinline__ int popcount6(unsigned mask) {
+    return __popc(mask & 0x3fu);
+}
+
+__device__ __forceinline__ int popcount64(uint64_t mask) {
+    return __popcll(static_cast<unsigned long long>(mask));
+}
+
+__device__ __forceinline__ int max_run6(unsigned mask) {
+    int best = 0;
+    int run = 0;
+    #pragma unroll
+    for (int k = 0; k < WIN; ++k) {
+        if (mask & (1u << k)) {
+            ++run;
+            if (run > best) best = run;
+        } else {
+            run = 0;
+        }
+    }
+    return best;
+}
+
+__device__ __forceinline__ int span6(unsigned mask) {
+    int first = WIN;
+    int last = -1;
+    #pragma unroll
+    for (int k = 0; k < WIN; ++k) {
+        if (mask & (1u << k)) {
+            if (first == WIN) first = k;
+            last = k;
+        }
+    }
+    return last < 0 ? 0 : last - first + 1;
+}
+
+__device__ __forceinline__ int pattern_value_v2(unsigned mask, int open_ends) {
+    const int stones = popcount6(mask);
+    const int run = max_run6(mask);
+    const int span = span6(mask);
+    const int compact = stones >= 2 ? (6 - span) : 0;
+
+    switch (stones) {
+        case 5:
+            return 460000 + open_ends * 35000 + run * 2500;
+        case 4:
+            return 30000 + run * run * 1800 + compact * 900 + open_ends * 3500;
+        case 3:
+            return 2200 + run * run * 320 + compact * 160 + open_ends * 320;
+        case 2:
+            return 180 + run * run * 45 + compact * 25 + open_ends * 25;
+        case 1:
+            return 12 + open_ends * 3;
+        default:
+            return 0;
+    }
+}
+
+__device__ __forceinline__ uint64_t relative_threat_bit(int direction, int offset) {
+    // Along one line through the candidate there are ten possible other cells:
+    // offsets -5..-1 and +1..+5. Four directions fit exactly into 40 bits.
+    if (offset == 0 || offset < -5 || offset > 5) {
+        return 0;
+    }
+    const int local = offset < 0 ? offset + 5 : offset + 4;
+    return uint64_t{1} << (direction * 10 + local);
+}
+
+__device__ __forceinline__ int score_cell_v2(
+    const int8_t* board,
+    int action,
+    int8_t player,
+    int8_t stones_left) {
+    if (board[action] != 0) {
+        return INT_MIN / 4;
+    }
+
+    const int row = action / BOARD;
+    const int col = action - row * BOARD;
+    constexpr int DR[4] = {0, 1, 1, 1};
+    constexpr int DC[4] = {1, 0, 1, -1};
+
+    int own_win = 0;
+    int opp_win = 0;
+    int own_four = 0;
+    int opp_four = 0;
+    int own_three = 0;
+    int opp_three = 0;
+    unsigned own_four_dirs = 0;
+    unsigned opp_four_dirs = 0;
+    unsigned own_three_dirs = 0;
+    unsigned opp_three_dirs = 0;
+    uint64_t own_finish_mask = 0;
+    uint64_t opp_finish_mask = 0;
+    int attack_score = 0;
+    int defense_score = 0;
+
+    #pragma unroll
+    for (int d = 0; d < 4; ++d) {
+        const int dr = DR[d];
+        const int dc = DC[d];
+
+        const int own_run = contiguous_after(board, row, col, dr, dc, player);
+        const int opp_run = contiguous_after(board, row, col, dr, dc, -player);
+        attack_score += own_run * own_run * 105;
+        defense_score += opp_run * opp_run * 112;
+
+        #pragma unroll
+        for (int rel = 0; rel < WIN; ++rel) {
+            const int sr = row - rel * dr;
+            const int sc = col - rel * dc;
+            const int er = sr + (WIN - 1) * dr;
+            const int ec = sc + (WIN - 1) * dc;
+            if (!inside(sr, sc) || !inside(er, ec)) {
+                continue;
+            }
+
+            unsigned mine_mask = 0;
+            unsigned theirs_mask = 0;
+            #pragma unroll
+            for (int k = 0; k < WIN; ++k) {
+                const int rr = sr + k * dr;
+                const int cc = sc + k * dc;
+                const int8_t v = board[rr * BOARD + cc];
+                mine_mask |= static_cast<unsigned>(v == player) << k;
+                theirs_mask |= static_cast<unsigned>(v == -player) << k;
+            }
+
+            int open_ends = 0;
+            const int br = sr - dr;
+            const int bc = sc - dc;
+            const int ar = er + dr;
+            const int ac = ec + dc;
+            if (inside(br, bc) && board[br * BOARD + bc] == 0) ++open_ends;
+            if (inside(ar, ac) && board[ar * BOARD + ac] == 0) ++open_ends;
+
+            const unsigned candidate_bit = 1u << rel;
+
+            if (theirs_mask == 0) {
+                const unsigned after_mask = mine_mask | candidate_bit;
+                const int after = popcount6(after_mask);
+                attack_score += pattern_value_v2(after_mask, open_ends);
+                own_win += (after >= 6);
+                if (after == 5) {
+                    #pragma unroll
+                    for (int k = 0; k < WIN; ++k) {
+                        if ((after_mask & (1u << k)) == 0) {
+                            own_finish_mask |= relative_threat_bit(d, k - rel);
+                        }
+                    }
+                } else if (after == 4) {
+                    ++own_four;
+                    own_four_dirs |= 1u << d;
+                } else if (after == 3) {
+                    ++own_three;
+                    own_three_dirs |= 1u << d;
+                }
+            }
+
+            if (mine_mask == 0) {
+                const unsigned after_mask = theirs_mask | candidate_bit;
+                const int after = popcount6(after_mask);
+                defense_score += pattern_value_v2(after_mask, open_ends);
+                opp_win += (after >= 6);
+                if (after == 5) {
+                    #pragma unroll
+                    for (int k = 0; k < WIN; ++k) {
+                        if ((after_mask & (1u << k)) == 0) {
+                            opp_finish_mask |= relative_threat_bit(d, k - rel);
+                        }
+                    }
+                } else if (after == 4) {
+                    ++opp_four;
+                    opp_four_dirs |= 1u << d;
+                } else if (after == 3) {
+                    ++opp_three;
+                    opp_three_dirs |= 1u << d;
+                }
+            }
+        }
+    }
+
+    const int own_finish = popcount64(own_finish_mask);
+    const int opp_finish = popcount64(opp_finish_mask);
+    const int own_four_dir_count = __popc(own_four_dirs);
+    const int opp_four_dir_count = __popc(opp_four_dirs);
+    const int own_three_dir_count = __popc(own_three_dirs);
+    const int opp_three_dir_count = __popc(opp_three_dirs);
+
+    int nearby_own = 0;
+    int nearby_opp = 0;
+    for (int rr = row - 2; rr <= row + 2; ++rr) {
+        for (int cc = col - 2; cc <= col + 2; ++cc) {
+            if (!inside(rr, cc) || (rr == row && cc == col)) continue;
+            const int8_t v = board[rr * BOARD + cc];
+            nearby_own += (v == player);
+            nearby_opp += (v == -player);
+        }
+    }
+
+    const int centre_bonus = 18 - (iabs(row - 9) + iabs(col - 9));
+    const int quiet_score =
+        attack_score * 4 + defense_score * 5 +
+        own_four * 145000 + opp_four * 160000 +
+        own_three * 8500 + opp_three * 9500 +
+        own_four_dir_count * 18000 + opp_four_dir_count * 21000 +
+        own_three_dir_count * 1800 + opp_three_dir_count * 2200 +
+        nearby_own * 125 + nearby_opp * 110 + centre_bonus * 8;
+
+    // Hard tactical classes dominate all positional arithmetic.
+    if (own_win > 0) {
+        return 1000000000 + own_win * 1500000 + quiet_score / 64;
+    }
+    // First stone of our Connect6 turn creates a finishing cell; the second
+    // stone can take it immediately. No two-stone search/state is needed.
+    if (stones_left >= 2 && own_finish > 0) {
+        return 960000000 + own_finish * 1500000 + quiet_score / 64;
+    }
+    // Occupying a cell where the opponent could win immediately is mandatory.
+    if (opp_win > 0) {
+        return 920000000 + opp_win * 1500000 + quiet_score / 64;
+    }
+    // On our final stone, block cells which would let the opponent use its
+    // first stone to create five and its second stone to finish the six.
+    if (stones_left <= 1 && opp_finish > 0) {
+        return 820000000 + opp_finish * 1500000 + quiet_score / 64;
+    }
+    // A true Connect6 fork needs at least three distinct finishing cells when
+    // the opponent will receive two blocking stones next turn.
+    if (stones_left <= 1 && own_finish >= 3) {
+        return 650000000 + own_finish * 1800000 + quiet_score / 32;
+    }
+    if (opp_finish >= 3) {
+        return 620000000 + opp_finish * 1800000 + quiet_score / 32;
+    }
+    if (own_finish >= 2) {
+        return 360000000 + own_finish * 1200000 + quiet_score / 24;
+    }
+    if (opp_finish >= 2) {
+        return 340000000 + opp_finish * 1200000 + quiet_score / 24;
+    }
+    if (own_finish == 1) {
+        return 280000000 + quiet_score / 16;
+    }
+    if (opp_finish == 1) {
+        return 260000000 + quiet_score / 16;
+    }
+    if (own_four >= 2 || own_four_dir_count >= 2) {
+        return 105000000 + own_four * 350000 + own_four_dir_count * 800000 + quiet_score / 8;
+    }
+    if (opp_four >= 2 || opp_four_dir_count >= 2) {
+        return 98000000 + opp_four * 350000 + opp_four_dir_count * 800000 + quiet_score / 8;
+    }
+
+    return quiet_score;
+}
+
 __device__ __forceinline__ bool better(
     int candidate_score,
     int candidate_action,
@@ -202,6 +468,7 @@ __device__ __forceinline__ bool better(
          (best_action < 0 || candidate_action < best_action));
 }
 
+template <bool V2>
 __global__ void tactical_bot_kernel(
     const int8_t* __restrict__ boards,
     const int8_t* __restrict__ current_player,
@@ -209,9 +476,7 @@ __global__ void tactical_bot_kernel(
     int64_t* __restrict__ actions,
     int batch) {
     const int board_id = blockIdx.x;
-    if (board_id >= batch) {
-        return;
-    }
+    if (board_id >= batch) return;
 
     __shared__ int8_t shared_board[CELLS];
     __shared__ int shared_score[THREADS];
@@ -230,7 +495,9 @@ __global__ void tactical_bot_kernel(
     const int8_t left = stones_left[board_id];
 
     for (int action = tid; action < CELLS; action += blockDim.x) {
-        const int s = score_cell(shared_board, action, player, left);
+        const int s = V2
+            ? score_cell_v2(shared_board, action, player, left)
+            : score_cell_v1(shared_board, action, player, left);
         if (better(s, action, local_score, local_action)) {
             local_score = s;
             local_action = action;
@@ -245,11 +512,7 @@ __global__ void tactical_bot_kernel(
         if (tid < stride) {
             const int other_score = shared_score[tid + stride];
             const int other_action = shared_action[tid + stride];
-            if (better(
-                    other_score,
-                    other_action,
-                    shared_score[tid],
-                    shared_action[tid])) {
+            if (better(other_score, other_action, shared_score[tid], shared_action[tid])) {
                 shared_score[tid] = other_score;
                 shared_action[tid] = other_action;
             }
@@ -264,7 +527,6 @@ __global__ void tactical_bot_kernel(
 
 }  // namespace
 
-
 extern "C" cudaError_t launch_tactical_bot_cuda(
     const int8_t* boards,
     const int8_t* current_player,
@@ -272,14 +534,21 @@ extern "C" cudaError_t launch_tactical_bot_cuda(
     int64_t* actions,
     int batch,
     cudaStream_t stream) {
-    if (batch <= 0) {
-        return cudaSuccess;
-    }
-    tactical_bot_kernel<<<batch, THREADS, 0, stream>>>(
-        boards,
-        current_player,
-        stones_left,
-        actions,
-        batch);
+    if (batch <= 0) return cudaSuccess;
+    tactical_bot_kernel<false><<<batch, THREADS, 0, stream>>>(
+        boards, current_player, stones_left, actions, batch);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t launch_tactical_bot_v2_cuda(
+    const int8_t* boards,
+    const int8_t* current_player,
+    const int8_t* stones_left,
+    int64_t* actions,
+    int batch,
+    cudaStream_t stream) {
+    if (batch <= 0) return cudaSuccess;
+    tactical_bot_kernel<true><<<batch, THREADS, 0, stream>>>(
+        boards, current_player, stones_left, actions, batch);
     return cudaGetLastError();
 }
