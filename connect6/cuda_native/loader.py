@@ -228,12 +228,16 @@ def _run_vcvars_and_capture_environment(
     return env
 
 
-def _prepend_path(path: Path) -> None:
-    current = os.environ.get("PATH", "")
+def _prepend_env_path(variable: str, path: Path) -> None:
+    current = os.environ.get(variable, "")
     item = str(path)
     parts = current.split(os.pathsep) if current else []
     if item.lower() not in {p.lower() for p in parts}:
-        os.environ["PATH"] = item + (os.pathsep + current if current else "")
+        os.environ[variable] = item + (os.pathsep + current if current else "")
+
+
+def _prepend_path(path: Path) -> None:
+    _prepend_env_path("PATH", path)
 
 
 def _bootstrap_msvc_environment() -> None:
@@ -241,19 +245,37 @@ def _bootstrap_msvc_environment() -> None:
         return
 
     vcvars, selector, full_version, toolset_root, bin_dir = _select_windows_toolchain()
+    tool_include = toolset_root / "include"
+    tool_lib = toolset_root / "lib" / "x64"
+    msvcprt = tool_lib / "msvcprt.lib"
 
-    # vcvars supplies Windows SDK/CRT include+lib paths. Then force the exact
-    # complete v143 compiler directory to the front of PATH so VS2026/v145
-    # cannot win host-compiler resolution.
+    if not tool_include.is_dir() or not tool_lib.is_dir() or not msvcprt.is_file():
+        raise RuntimeError(
+            "Wybrany v143 ma kompilator x64, ale brakuje jego nagłówków/bibliotek runtime.\n"
+            f"Toolset: {toolset_root}\n"
+            f"include: {tool_include} (exists={tool_include.is_dir()})\n"
+            f"lib x64: {tool_lib} (exists={tool_lib.is_dir()})\n"
+            f"msvcprt.lib: {msvcprt} (exists={msvcprt.is_file()})\n"
+            "W Visual Studio Installer doinstaluj pełny komponent "
+            "'MSVC v143 - VS 2022 C++ x64/x86 build tools'."
+        )
+
+    # vcvars supplies Windows SDK/UCRT paths. Then force every MSVC-specific
+    # path to the exact same complete v143 toolset so VS2026/v145 cannot leak
+    # into compilation or linking.
     env = _run_vcvars_and_capture_environment(vcvars, selector)
     os.environ.update(env)
     _prepend_path(bin_dir)
+    _prepend_env_path("INCLUDE", tool_include)
+    _prepend_env_path("LIB", tool_lib)
+    _prepend_env_path("LIBPATH", tool_lib)
 
     cl_path = bin_dir / "cl.exe"
     link_path = bin_dir / "link.exe"
 
     os.environ["VCToolsInstallDir"] = str(toolset_root) + os.sep
     os.environ["VCToolsVersion"] = full_version
+    os.environ["CONNECT6_MSVC_LIB_X64"] = str(tool_lib)
     os.environ["DISTUTILS_USE_SDK"] = "1"
     os.environ["MSSdk"] = "1"
 
@@ -283,6 +305,7 @@ def _bootstrap_msvc_environment() -> None:
     print(f"[NATIVE BUILD] host layout: {bin_dir.parent.name} -> x64")
     print(f"[NATIVE BUILD] cl.exe: {cl}")
     print(f"[NATIVE BUILD] link.exe: {link}")
+    print(f"[NATIVE BUILD] MSVC lib x64: {tool_lib}")
 
 
 def _require_environment() -> None:
@@ -317,7 +340,8 @@ def load_native_championship_extension(*, verbose: bool = True):
     old_arch = os.environ.get("TORCH_CUDA_ARCH_LIST")
     os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0"
     try:
-        cflags = ["/O2", "/std:c++17"] if platform.system() == "Windows" else ["-O3", "-std=c++17"]
+        is_windows = platform.system() == "Windows"
+        cflags = ["/O2", "/std:c++17"] if is_windows else ["-O3", "-std=c++17"]
         cuda_flags = [
             "-O3",
             "-DUSE_CUDA",
@@ -328,11 +352,18 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-std=c++17",
             "-gencode=arch=compute_120,code=sm_120",
         ]
+        ldflags: list[str] = []
+        if is_windows:
+            msvc_lib = os.environ.get("CONNECT6_MSVC_LIB_X64")
+            if msvc_lib:
+                ldflags.append(f"/LIBPATH:{msvc_lib}")
+
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v10",
+            name="connect6_cuda_championship_sm120_v11",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
+            extra_ldflags=ldflags,
             with_cuda=True,
             verbose=verbose,
         )
