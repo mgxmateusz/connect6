@@ -9,19 +9,21 @@ from torch import nn
 class PolicyValueNet(nn.Module):
     """W pełni konwolucyjna sieć POLICY + VALUE dla Connect6.
 
-    Wejście ma kształt [B, 3, H, W]:
+    Wejście ma kształt [B, 4, H, W]:
       0 = moje kamienie,
       1 = kamienie przeciwnika,
-      2 = czy aktualna decyzja jest ostatnim kamieniem w turze.
+      2 = maska prawdziwej planszy (1 na planszy, 0 w paddingu),
+      3 = czy aktualna decyzja jest ostatnim kamieniem w turze.
 
-    Backbone zachowuje rozdzielczość planszy przez cały model. Dla standardowej
-    planszy 19x19 receptive field po ośmiu warstwach wynosi dokładnie 37x37,
-    dzięki czemu także pole w rogu może zależeć od przeciwległego rogu.
+    Backbone zachowuje rozdzielczość planszy przez cały model. Każdy blok ma
+    postać Conv -> GroupNorm -> SiLU. GroupNorm zawsze używa dokładnie ośmiu
+    kanałów na grupę, dzięki czemu normalizacja nie zależy od wielkości batcha.
     """
 
     DEFAULT_KERNELS = (23, 3, 3, 3, 3, 3, 3, 3)
     DEFAULT_CHANNELS = (32, 32, 64, 64, 64, 96, 96, 96)
-    INPUT_CHANNELS = 3
+    INPUT_CHANNELS = 4
+    CHANNELS_PER_GROUP = 8
 
     def __init__(
         self,
@@ -45,11 +47,18 @@ class PolicyValueNet(nn.Module):
             raise ValueError("Każdy kernel musi być dodatnią liczbą nieparzystą")
         if any(c <= 0 for c in channels):
             raise ValueError("Liczba kanałów musi być większa od zera")
+        if any(c % self.CHANNELS_PER_GROUP != 0 for c in channels):
+            raise ValueError(
+                f"Każda warstwa musi mieć liczbę kanałów podzielną przez "
+                f"{self.CHANNELS_PER_GROUP}, aby GroupNorm miał zawsze "
+                f"{self.CHANNELS_PER_GROUP} kanałów na grupę"
+            )
 
         self.kernels = kernels
         self.channels = channels
 
         convs: list[nn.Conv2d] = []
+        norms: list[nn.GroupNorm] = []
         in_channels = self.input_channels
         for kernel, out_channels in zip(kernels, channels):
             convs.append(
@@ -59,11 +68,19 @@ class PolicyValueNet(nn.Module):
                     kernel_size=kernel,
                     stride=1,
                     padding=kernel // 2,
-                    bias=True,
+                    bias=False,
+                )
+            )
+            norms.append(
+                nn.GroupNorm(
+                    num_groups=out_channels // self.CHANNELS_PER_GROUP,
+                    num_channels=out_channels,
+                    affine=True,
                 )
             )
             in_channels = out_channels
         self.convs = nn.ModuleList(convs)
+        self.norms = nn.ModuleList(norms)
         self.activation = nn.SiLU(inplace=True)
 
         # POLICY: jedna mapa logitów 19x19, następnie flatten -> 361 akcji.
@@ -83,8 +100,12 @@ class PolicyValueNet(nn.Module):
     def _inicjalizuj_wagi(self) -> None:
         for conv in self.convs:
             nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
-            if conv.bias is not None:
-                nn.init.zeros_(conv.bias)
+
+        for norm in self.norms:
+            if norm.weight is not None:
+                nn.init.ones_(norm.weight)
+            if norm.bias is not None:
+                nn.init.zeros_(norm.bias)
 
         # Małe początkowe logity ograniczają przypadkowo bardzo ostrą policy.
         nn.init.normal_(self.policy_output.weight, mean=0.0, std=0.01)
@@ -102,8 +123,8 @@ class PolicyValueNet(nn.Module):
             )
 
         features = x
-        for conv in self.convs:
-            features = self.activation(conv(features))
+        for conv, norm in zip(self.convs, self.norms):
+            features = self.activation(norm(conv(features)))
 
         logits = self.policy_output(features).flatten(1)
         value_map = self.value_output(features)
