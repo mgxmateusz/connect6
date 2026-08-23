@@ -72,7 +72,7 @@ def _find_vcvars64_candidates() -> list[Path]:
 
 
 def _installed_msvc_toolsets(vcvars: Path) -> list[tuple[tuple[int, int], str]]:
-    """Return installed toolsets, newest first: ((14, 44), '14.44.xxxxx')."""
+    """Return installed toolset directories, newest first."""
     vc_root = vcvars.parents[2]
     toolsets_root = vc_root / "Tools" / "MSVC"
     if not toolsets_root.is_dir():
@@ -90,10 +90,33 @@ def _installed_msvc_toolsets(vcvars: Path) -> list[tuple[tuple[int, int], str]]:
     return out
 
 
-def _select_windows_toolchain() -> tuple[Path, str, str, Path]:
-    """Select newest installed MSVC toolset compatible with CUDA 12.9.
+def _find_x64_tool_bin(toolset_root: Path) -> Path | None:
+    """Find a host compiler capable of producing x64 code."""
+    candidates = [
+        toolset_root / "bin" / "Hostx64" / "x64",
+        toolset_root / "bin" / "HostX64" / "x64",
+        toolset_root / "bin" / "Hostx86" / "x64",
+        toolset_root / "bin" / "HostX86" / "x64",
+    ]
+    seen: set[str] = set()
+    for bin_dir in candidates:
+        key = str(bin_dir).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if (bin_dir / "cl.exe").is_file() and (bin_dir / "link.exe").is_file():
+            return bin_dir
+    return None
 
-    Returns (vcvars64.bat, selector, full_version, toolset_root).
+
+def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
+    """Select newest COMPLETE MSVC toolset compatible with CUDA 12.9.
+
+    A directory under VC/Tools/MSVC is not enough: optional v143 libraries can
+    create a version directory without cl.exe. We therefore only rank toolsets
+    that actually contain cl.exe + link.exe capable of targeting x64.
+
+    Returns (vcvars64.bat, selector, full_version, toolset_root, bin_dir).
     """
     installations = _find_vcvars64_candidates()
     if not installations:
@@ -102,32 +125,44 @@ def _select_windows_toolchain() -> tuple[Path, str, str, Path]:
             "'Programowanie aplikacji klasycznych w języku C++'."
         )
 
-    compatible: list[tuple[tuple[int, int], str, Path, Path]] = []
+    compatible: list[tuple[tuple[int, int], str, Path, Path, Path]] = []
     detected: list[str] = []
+    incomplete: list[str] = []
+
     for vcvars in installations:
         vc_root = vcvars.parents[2]
         toolsets = _installed_msvc_toolsets(vcvars)
         if toolsets:
             detected.append(f"{vc_root}: " + ", ".join(v for _, v in toolsets))
+
         for key, full_version in toolsets:
-            if (14, 10) <= key < (14, 50):
-                toolset_root = vc_root / "Tools" / "MSVC" / full_version
-                compatible.append((key, full_version, vcvars, toolset_root))
+            if not ((14, 10) <= key < (14, 50)):
+                continue
+
+            toolset_root = vc_root / "Tools" / "MSVC" / full_version
+            bin_dir = _find_x64_tool_bin(toolset_root)
+            if bin_dir is None:
+                incomplete.append(f"{full_version}: brak cl.exe/link.exe target x64")
+                continue
+
+            compatible.append((key, full_version, vcvars, toolset_root, bin_dir))
 
     if not compatible:
         details = "\n".join(detected) if detected else "(nie wykryto katalogów MSVC)"
+        incomplete_details = (
+            "\n".join(incomplete) if incomplete else "(brak kompatybilnych katalogów v143)"
+        )
         raise RuntimeError(
-            "CUDA 12.9 nie obsługuje zainstalowanego MSVC 14.50+/Visual Studio 2026.\n"
-            "W Visual Studio Installer -> Build Tools 2026 -> Modyfikuj -> "
-            "Pojedyncze składniki zaznacz: 'MSVC v143 - VS 2022 C++ x64/x86 build tools'.\n"
-            "Nie musisz usuwać MSVC 14.51 ani instalować całego Visual Studio 2022.\n"
-            f"Wykryte toolsety:\n{details}"
+            "Nie znaleziono kompletnego toolsetu MSVC zgodnego z CUDA 12.9.\n"
+            "Potrzebny jest v143 / VS 2022 C++ x64/x86 build tools z cl.exe i link.exe.\n"
+            f"Wykryte toolsety:\n{details}\n"
+            f"Niekompletne kompatybilne katalogi:\n{incomplete_details}"
         )
 
-    compatible.sort(reverse=True, key=lambda x: x[0])
-    key, full_version, vcvars, toolset_root = compatible[0]
+    compatible.sort(reverse=True, key=lambda x: (x[0], x[1]))
+    key, full_version, vcvars, toolset_root, bin_dir = compatible[0]
     selector = f"{key[0]}.{key[1]}"
-    return vcvars, selector, full_version, toolset_root
+    return vcvars, selector, full_version, toolset_root, bin_dir
 
 
 def _run_vcvars_and_capture_environment(
@@ -201,56 +236,22 @@ def _prepend_path(path: Path) -> None:
         os.environ["PATH"] = item + (os.pathsep + current if current else "")
 
 
-def _find_x64_tool_bin(toolset_root: Path) -> Path | None:
-    """Find a host compiler capable of producing x64 code.
-
-    A full v143 install normally has Hostx64/x64. Some installations only
-    expose Hostx86/x64; NVCC can use that host compiler as well, so accept it.
-    """
-    candidates = [
-        toolset_root / "bin" / "Hostx64" / "x64",
-        toolset_root / "bin" / "Hostx86" / "x64",
-    ]
-    for bin_dir in candidates:
-        if (bin_dir / "cl.exe").is_file() and (bin_dir / "link.exe").is_file():
-            return bin_dir
-    return None
-
-
 def _bootstrap_msvc_environment() -> None:
     if platform.system() != "Windows":
         return
 
-    vcvars, selector, full_version, toolset_root = _select_windows_toolchain()
+    vcvars, selector, full_version, toolset_root, bin_dir = _select_windows_toolchain()
 
-    # Ask vcvars to populate Windows SDK/CRT/INCLUDE/LIB. We then force the exact
-    # v143 binary directory into PATH ourselves. This avoids relying on vcvars'
-    # PATH selection when v145 and v143 coexist inside VS 2026 Build Tools.
+    # vcvars supplies Windows SDK/CRT include+lib paths. Then force the exact
+    # complete v143 compiler directory to the front of PATH so VS2026/v145
+    # cannot win host-compiler resolution.
     env = _run_vcvars_and_capture_environment(vcvars, selector)
     os.environ.update(env)
-
-    bin_dir = _find_x64_tool_bin(toolset_root)
-    if bin_dir is None:
-        found_cl = []
-        bin_root = toolset_root / "bin"
-        if bin_root.is_dir():
-            found_cl = [str(p) for p in bin_root.rglob("cl.exe")]
-        detected = "\n".join(found_cl[:20]) if found_cl else "(nie znaleziono żadnego cl.exe w tym toolsecie)"
-        raise RuntimeError(
-            "Znaleziono katalog MSVC v143, ale nie ma w nim kompilatora targetującego x64.\n"
-            f"Toolset: {toolset_root}\n"
-            "Sprawdzono: bin\\Hostx64\\x64 oraz bin\\Hostx86\\x64.\n"
-            f"Znalezione cl.exe:\n{detected}\n"
-            "W Visual Studio Installer -> Build Tools 2026 -> Modyfikuj -> Pojedyncze składniki "
-            "zaznacz pełny komponent 'MSVC v143 - VS 2022 C++ x64/x86 build tools' "
-            "(nie biblioteki Spectre/ATL/MFC dla v143)."
-        )
+    _prepend_path(bin_dir)
 
     cl_path = bin_dir / "cl.exe"
     link_path = bin_dir / "link.exe"
-    _prepend_path(bin_dir)
 
-    # Explicitly expose selected toolset to build systems that inspect these vars.
     os.environ["VCToolsInstallDir"] = str(toolset_root) + os.sep
     os.environ["VCToolsVersion"] = full_version
     os.environ["DISTUTILS_USE_SDK"] = "1"
@@ -260,8 +261,15 @@ def _bootstrap_msvc_environment() -> None:
     link = shutil.which("link.exe")
     if not cl or not link:
         raise RuntimeError(
-            "Wewnętrzny błąd konfiguracji PATH: binarki istnieją, ale system ich nie widzi.\n"
+            "Wewnętrzny błąd konfiguracji PATH: wybrane binarki istnieją, ale system ich nie widzi.\n"
             f"cl={cl_path}\nlink={link_path}\nPATH={os.environ.get('PATH', '')}"
+        )
+
+    selected_root = str(toolset_root.resolve()).lower()
+    if not str(Path(cl).resolve()).lower().startswith(selected_root):
+        raise RuntimeError(
+            "PATH wskazuje inny cl.exe niż wybrany kompletny v143.\n"
+            f"Wybrany: {cl_path}\nZnaleziony: {cl}"
         )
 
     cl_lower = cl.lower().replace("/", "\\")
@@ -320,7 +328,7 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-gencode=arch=compute_120,code=sm_120",
         ]
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v8",
+            name="connect6_cuda_championship_sm120_v9",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
