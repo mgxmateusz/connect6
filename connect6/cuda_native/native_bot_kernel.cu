@@ -1,5 +1,3 @@
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <climits>
@@ -11,18 +9,15 @@ constexpr int CELLS = BOARD * BOARD;
 constexpr int THREADS = 256;
 constexpr int WIN = 6;
 
-#define CUDA_CHECK(EXPR) do { \
-    cudaError_t _e = (EXPR); \
-    TORCH_CHECK(_e == cudaSuccess, "CUDA error: ", cudaGetErrorString(_e)); \
-} while (0)
-
 __device__ __forceinline__ bool inside(int r, int c) {
     return static_cast<unsigned>(r) < BOARD && static_cast<unsigned>(c) < BOARD;
 }
 
+__device__ __forceinline__ int iabs(int x) {
+    return x < 0 ? -x : x;
+}
+
 __device__ __forceinline__ int window_value(int stones_after, int open_ends) {
-    // This is only the smooth/background part of the score. Tactical classes
-    // (win, block, five, multi-threat) receive much larger priorities below.
     switch (stones_after) {
         case 5: return 400000 + open_ends * 30000;
         case 4: return 22000 + open_ends * 2500;
@@ -40,7 +35,7 @@ __device__ __forceinline__ int contiguous_after(
     int dr,
     int dc,
     int8_t stone) {
-    int total = 1;  // candidate itself
+    int total = 1;
     #pragma unroll
     for (int sign = -1; sign <= 1; sign += 2) {
         #pragma unroll
@@ -86,16 +81,11 @@ __device__ __forceinline__ int score_cell(
         const int dr = DR[d];
         const int dc = DC[d];
 
-        // Continuous lines are a small secondary preference. The window scan
-        // below also catches broken patterns such as XX_XX and XXX_X.
         const int own_run = contiguous_after(board, row, col, dr, dc, player);
         const int opp_run = contiguous_after(board, row, col, dr, dc, -player);
         attack_score += own_run * own_run * 90;
         defense_score += opp_run * opp_run * 95;
 
-        // Every length-6 window containing the candidate is inspected once.
-        // A window with no opponent stones is a viable attacking window;
-        // symmetrically a window with no own stones is a defensive threat.
         #pragma unroll
         for (int rel = 0; rel < WIN; ++rel) {
             const int sr = row - rel * dr;
@@ -108,7 +98,6 @@ __device__ __forceinline__ int score_cell(
 
             int mine = 0;
             int theirs = 0;
-            int empty = 0;
             #pragma unroll
             for (int k = 0; k < WIN; ++k) {
                 const int rr = sr + k * dr;
@@ -116,7 +105,6 @@ __device__ __forceinline__ int score_cell(
                 const int8_t v = board[rr * BOARD + cc];
                 mine += (v == player);
                 theirs += (v == -player);
-                empty += (v == 0);
             }
 
             int open_ends = 0;
@@ -132,7 +120,7 @@ __device__ __forceinline__ int score_cell(
             }
 
             if (theirs == 0) {
-                const int after = mine + 1;  // candidate becomes ours
+                const int after = mine + 1;
                 attack_score += window_value(after, open_ends);
                 own_win += (after >= 6);
                 own_five += (after == 5);
@@ -141,7 +129,7 @@ __device__ __forceinline__ int score_cell(
             }
 
             if (mine == 0) {
-                const int after = theirs + 1;  // what if opponent used this cell
+                const int after = theirs + 1;
                 defense_score += window_value(after, open_ends);
                 opp_win += (after >= 6);
                 opp_five += (after == 5);
@@ -151,9 +139,6 @@ __device__ __forceinline__ int score_cell(
         }
     }
 
-    // Tiny locality term: only decides between otherwise similar tactical
-    // moves. It keeps quiet play near existing stones and mildly prefers the
-    // centre on an empty/sparse board.
     int nearby_own = 0;
     int nearby_opp = 0;
     for (int rr = row - 2; rr <= row + 2; ++rr) {
@@ -166,37 +151,25 @@ __device__ __forceinline__ int score_cell(
             nearby_opp += (v == -player);
         }
     }
-    const int centre_bonus = 18 - (abs(row - 9) + abs(col - 9));
+    const int centre_bonus = 18 - (iabs(row - 9) + iabs(col - 9));
     const int quiet_score =
         attack_score * 4 + defense_score * 5 +
         own_four * 120000 + opp_four * 130000 +
         own_three * 7000 + opp_three * 7500 +
         nearby_own * 120 + nearby_opp * 100 + centre_bonus * 8;
 
-    // Strict tactical hierarchy. The bot's main job is to never throw away
-    // obvious wins or lose to elementary one/two-stone threats.
     if (own_win > 0) {
         return 1000000000 + own_win * 1000000 + quiet_score / 64;
     }
-
-    // With two stones remaining, creating a 5-in-6 now is a guaranteed win on
-    // our second stone because the opponent does not move in between.
     if (stones_left >= 2 && own_five > 0) {
         return 950000000 + own_five * 1000000 + quiet_score / 64;
     }
-
-    // Never ignore a square on which the opponent could win immediately.
     if (opp_win > 0) {
         return 900000000 + opp_win * 1000000 + quiet_score / 64;
     }
-
-    // If this is our last stone of the turn, an opponent 4+2-empty window is
-    // an immediate Connect6 two-stone threat next turn. Blocking it is more
-    // important than ordinary attack.
     if (stones_left <= 1 && opp_five > 0) {
         return 700000000 + opp_five * 1000000 + quiet_score / 64;
     }
-
     if (own_five >= 2) {
         return 520000000 + own_five * 1000000 + quiet_score / 32;
     }
@@ -292,25 +265,21 @@ __global__ void tactical_bot_kernel(
 }  // namespace
 
 
-torch::Tensor tactical_bot_actions_cuda(
-    torch::Tensor boards,
-    torch::Tensor current_player,
-    torch::Tensor stones_left) {
-    const auto batch = static_cast<int>(boards.size(0));
-    auto actions = torch::empty(
-        {batch},
-        boards.options().dtype(torch::kInt64));
-    if (batch == 0) {
-        return actions;
+extern "C" cudaError_t launch_tactical_bot_cuda(
+    const int8_t* boards,
+    const int8_t* current_player,
+    const int8_t* stones_left,
+    int64_t* actions,
+    int batch,
+    cudaStream_t stream) {
+    if (batch <= 0) {
+        return cudaSuccess;
     }
-
-    const auto stream = at::cuda::getCurrentCUDAStream(boards.get_device());
     tactical_bot_kernel<<<batch, THREADS, 0, stream>>>(
-        boards.data_ptr<int8_t>(),
-        current_player.data_ptr<int8_t>(),
-        stones_left.data_ptr<int8_t>(),
-        actions.data_ptr<int64_t>(),
+        boards,
+        current_player,
+        stones_left,
+        actions,
         batch);
-    CUDA_CHECK(cudaGetLastError());
-    return actions;
+    return cudaGetLastError();
 }
