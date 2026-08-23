@@ -201,6 +201,22 @@ def _prepend_path(path: Path) -> None:
         os.environ["PATH"] = item + (os.pathsep + current if current else "")
 
 
+def _find_x64_tool_bin(toolset_root: Path) -> Path | None:
+    """Find a host compiler capable of producing x64 code.
+
+    A full v143 install normally has Hostx64/x64. Some installations only
+    expose Hostx86/x64; NVCC can use that host compiler as well, so accept it.
+    """
+    candidates = [
+        toolset_root / "bin" / "Hostx64" / "x64",
+        toolset_root / "bin" / "Hostx86" / "x64",
+    ]
+    for bin_dir in candidates:
+        if (bin_dir / "cl.exe").is_file() and (bin_dir / "link.exe").is_file():
+            return bin_dir
+    return None
+
+
 def _bootstrap_msvc_environment() -> None:
     if platform.system() != "Windows":
         return
@@ -213,20 +229,27 @@ def _bootstrap_msvc_environment() -> None:
     env = _run_vcvars_and_capture_environment(vcvars, selector)
     os.environ.update(env)
 
-    bin_dir = toolset_root / "bin" / "Hostx64" / "x64"
-    cl_path = bin_dir / "cl.exe"
-    link_path = bin_dir / "link.exe"
-    if not cl_path.is_file() or not link_path.is_file():
+    bin_dir = _find_x64_tool_bin(toolset_root)
+    if bin_dir is None:
+        found_cl = []
+        bin_root = toolset_root / "bin"
+        if bin_root.is_dir():
+            found_cl = [str(p) for p in bin_root.rglob("cl.exe")]
+        detected = "\n".join(found_cl[:20]) if found_cl else "(nie znaleziono żadnego cl.exe w tym toolsecie)"
         raise RuntimeError(
-            "Znaleziono zgodny toolset, ale brakuje jego binarek x64.\n"
+            "Znaleziono katalog MSVC v143, ale nie ma w nim kompilatora targetującego x64.\n"
             f"Toolset: {toolset_root}\n"
-            f"Oczekiwano: {cl_path}\n"
-            f"Oczekiwano: {link_path}\n"
-            "W Visual Studio Installer doinstaluj pełny komponent "
-            "'MSVC v143 - VS 2022 C++ x64/x86 build tools'."
+            "Sprawdzono: bin\\Hostx64\\x64 oraz bin\\Hostx86\\x64.\n"
+            f"Znalezione cl.exe:\n{detected}\n"
+            "W Visual Studio Installer -> Build Tools 2026 -> Modyfikuj -> Pojedyncze składniki "
+            "zaznacz pełny komponent 'MSVC v143 - VS 2022 C++ x64/x86 build tools' "
+            "(nie biblioteki Spectre/ATL/MFC dla v143)."
         )
 
+    cl_path = bin_dir / "cl.exe"
+    link_path = bin_dir / "link.exe"
     _prepend_path(bin_dir)
+
     # Explicitly expose selected toolset to build systems that inspect these vars.
     os.environ["VCToolsInstallDir"] = str(toolset_root) + os.sep
     os.environ["VCToolsVersion"] = full_version
@@ -238,7 +261,7 @@ def _bootstrap_msvc_environment() -> None:
     if not cl or not link:
         raise RuntimeError(
             "Wewnętrzny błąd konfiguracji PATH: binarki istnieją, ale system ich nie widzi.\n"
-            f"bin_dir={bin_dir}\nPATH={os.environ.get('PATH', '')}"
+            f"cl={cl_path}\nlink={link_path}\nPATH={os.environ.get('PATH', '')}"
         )
 
     cl_lower = cl.lower().replace("/", "\\")
@@ -249,6 +272,7 @@ def _bootstrap_msvc_environment() -> None:
         )
 
     print(f"[NATIVE BUILD] MSVC selector: {selector} ({full_version})")
+    print(f"[NATIVE BUILD] host layout: {bin_dir.parent.name} -> x64")
     print(f"[NATIVE BUILD] cl.exe: {cl}")
     print(f"[NATIVE BUILD] link.exe: {link}")
 
@@ -296,7 +320,7 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-gencode=arch=compute_120,code=sm_120",
         ]
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v7",
+            name="connect6_cuda_championship_sm120_v8",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
