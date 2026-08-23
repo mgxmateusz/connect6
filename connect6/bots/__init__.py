@@ -9,3 +9,21 @@ from connect6.cuda_native import bot_loader as _bot_loader
 
 sys.modules.setdefault(__name__ + ".cuda_native", _cuda_native)
 sys.modules.setdefault(__name__ + ".cuda_native.bot_loader", _bot_loader)
+
+from .gpu_bot import (  # noqa: E402
+    GPU_TACTICAL_BOT,
+    GPU_TACTICAL_BOT_V2,
+    GPU_TACTICAL_BOTS,
+    GPUTacticalBot,
+    GPUTacticalBotV2,
+    create_gpu_tactical_bot,
+)
+
+__all__ = [
+    "GPU_TACTICAL_BOT",
+    "GPU_TACTICAL_BOT_V2",
+    "GPU_TACTICAL_BOTS",
+    "GPUTacticalBot",
+    "GPUTacticalBotV2",
+    "create_gpu_tactical_bot",
+]
