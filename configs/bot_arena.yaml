@@ -3,6 +3,10 @@ bot_arena:
   output_dir: "runs/connect6_cnn_01/bot_arena"
   device: "cuda"
 
+  # Domyślnie każdy autosave gra z oboma stałymi botami.
+  # Każdy bot rozgrywa 2 gry/model: model raz czarny i raz biały.
+  bots: ["v1", "v2"]
+
   # Ile różnych autosave'ów liczymy równolegle jednym grouped-conv na warstwę.
   # RTX 5070 powinna spokojnie obsłużyć 256; w razie OOM można zejść do 128/64.
   models_per_batch: 256
