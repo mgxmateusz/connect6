@@ -1,9 +1,9 @@
 # =============================================================================
-# KONFIGURACJA TRENINGU CONNECT6 - CNN
+# KONFIGURACJA TRENINGU CONNECT6 - CNN V5
 # =============================================================================
 
 run:
-  name: "connect6_cnn_01"
+  name: "connect6_cnn_02"
   root_dir: "runs"
   seed: 42
 
@@ -18,14 +18,15 @@ game:
   debug_checks: false
 
 model:
-  architecture_version: 4
+  architecture_version: 5
 
   # Backbone zachowuje 19x19 przez cały model (stride=1, same padding).
+  # Każdy blok: Conv -> GroupNorm (8 kanałów/grupę) -> SiLU.
   # Receptive field: 23 -> 25 -> 27 -> 29 -> 31 -> 33 -> 35 -> 37.
   kernels: [23, 3, 3, 3, 3, 3, 3, 3]
   channels: [32, 32, 64, 64, 64, 96, 96, 96]
 
-  # Aktywacja backbone jest na stałe SiLU.
+  # Wejście [B,4,19,19]: moje, przeciwnika, maska planszy, ostatni kamień tury.
   # POLICY: Conv 1x1, 96 -> 1 -> 361 logitów.
   # VALUE:  Conv 1x1, 96 -> 1 -> global mean -> tanh.
 
@@ -38,9 +39,10 @@ training:
   # Liczba plansz rozgrywanych równolegle.
   num_envs: 2048
 
-  # Faktyczny cel PPO = completed_positions_per_update * minibatch_size.
-  # Dla CNN minibatch=256 odpowiada najlepszemu zakresowi z benchmarków RTX 5070.
-  completed_positions_per_update: 768
+  # Target pełnych pozycji na update = num_envs * completed_positions_per_update.
+  # 384 zachowuje ~ten sam docelowy rozmiar PPO co wcześniejsze 768*minibatch(1024),
+  # ale parametr nie zależy już od wielkości minibatcha.
+  completed_positions_per_update: 384
 
   # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 10000000
@@ -78,14 +80,20 @@ training:
   random_black_opening_fraction: 0.50
 
   # --------------------------------------------------------------------------
-  # HISTORYCZNY SELF-PLAY / ANTI-FORGETTING
+  # PRZECIWNICY PODCZAS COLLECTU
   # --------------------------------------------------------------------------
+  # 50% stołów: current vs current
+  # 25% stołów: current vs historical
+  # 25% stołów: current vs GPU tactical bot
   historical_fraction: 0.25
+  bot_fraction: 0.25
+  bot_v1_fraction: 0.50
+
+  # Historyczne checkpointy są losowane niezależnie z powtórzeniami:
+  # 50% z całej historii, 25% z ostatniej połowy, 25% z ostatniej ćwiartki.
   historical_models_per_update: 128
   historical_ram_cache_models: 1024
   historical_inference_dtype: "bfloat16"   # bfloat16 | float16 | float32
-
-  # Historyczne polityki CNN są liczone grupowanymi konwolucjami na GPU.
 
   # --------------------------------------------------------------------------
   # CUDA MEMORY CACHE
