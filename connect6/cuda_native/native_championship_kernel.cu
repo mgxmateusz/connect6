@@ -572,9 +572,9 @@ std::vector<torch::Tensor> run_championship_cuda(
     }
     check_half_cuda_contiguous(policy_weight, "policy_weight");
 
-    const int slots = static_cast<int>(slots64);
-    const int total = static_cast<int>(game_ids.numel());
-    const int models = static_cast<int>(num_models);
+    int slots = static_cast<int>(slots64);
+    int total = static_cast<int>(game_ids.numel());
+    int models = static_cast<int>(num_models);
     TORCH_CHECK(total > 0, "Brak gier do rozegrania");
 
     const int expected_o[8] = {32, 32, 64, 64, 64, 96, 96, 96};
