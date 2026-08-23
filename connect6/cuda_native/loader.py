@@ -73,7 +73,6 @@ def _find_vcvars64_candidates() -> list[Path]:
 
 def _installed_msvc_toolsets(vcvars: Path) -> list[tuple[tuple[int, int], str]]:
     """Return installed toolsets, newest first: ((14, 44), '14.44.xxxxx')."""
-    # ...\VC\Auxiliary\Build\vcvars64.bat -> ...\VC
     vc_root = vcvars.parents[2]
     toolsets_root = vc_root / "Tools" / "MSVC"
     if not toolsets_root.is_dir():
@@ -91,11 +90,10 @@ def _installed_msvc_toolsets(vcvars: Path) -> list[tuple[tuple[int, int], str]]:
     return out
 
 
-def _select_windows_toolchain() -> tuple[Path, str]:
-    """Select the newest MSVC accepted by CUDA 12.x.
+def _select_windows_toolchain() -> tuple[Path, str, str, Path]:
+    """Select newest installed MSVC toolset compatible with CUDA 12.9.
 
-    CUDA 12.9 rejects the VS 2026 v145 toolset (MSVC 14.50+).  A v143
-    toolset can coexist inside Build Tools 2026, so prefer newest 14.3x/14.4x.
+    Returns (vcvars64.bat, selector, full_version, toolset_root).
     """
     installations = _find_vcvars64_candidates()
     if not installations:
@@ -104,17 +102,17 @@ def _select_windows_toolchain() -> tuple[Path, str]:
             "'Programowanie aplikacji klasycznych w języku C++'."
         )
 
-    compatible: list[tuple[tuple[int, int], str, Path]] = []
+    compatible: list[tuple[tuple[int, int], str, Path, Path]] = []
     detected: list[str] = []
     for vcvars in installations:
+        vc_root = vcvars.parents[2]
         toolsets = _installed_msvc_toolsets(vcvars)
         if toolsets:
-            detected.append(f"{vcvars.parent.parent.parent}: " + ", ".join(v for _, v in toolsets))
+            detected.append(f"{vc_root}: " + ", ".join(v for _, v in toolsets))
         for key, full_version in toolsets:
-            # VS2017..VS2022 family accepted by CUDA 12.9.  In practice the
-            # important upper bound here is MSVC < 14.50; 14.5x is VS2026.
             if (14, 10) <= key < (14, 50):
-                compatible.append((key, full_version, vcvars))
+                toolset_root = vc_root / "Tools" / "MSVC" / full_version
+                compatible.append((key, full_version, vcvars, toolset_root))
 
     if not compatible:
         details = "\n".join(detected) if detected else "(nie wykryto katalogów MSVC)"
@@ -127,13 +125,14 @@ def _select_windows_toolchain() -> tuple[Path, str]:
         )
 
     compatible.sort(reverse=True, key=lambda x: x[0])
-    key, full_version, vcvars = compatible[0]
-    # vcvars accepts a major.minor selector, e.g. -vcvars_ver=14.44.
+    key, full_version, vcvars, toolset_root = compatible[0]
     selector = f"{key[0]}.{key[1]}"
-    return vcvars, selector
+    return vcvars, selector, full_version, toolset_root
 
 
-def _run_vcvars_and_capture_environment(vcvars: Path, vcvars_ver: str | None = None) -> dict[str, str]:
+def _run_vcvars_and_capture_environment(
+    vcvars: Path, vcvars_ver: str | None = None
+) -> dict[str, str]:
     marker = "__CONNECT6_ENV_BEGIN__"
     args = f" -vcvars_ver={vcvars_ver}" if vcvars_ver else ""
     script = (
@@ -194,33 +193,64 @@ def _run_vcvars_and_capture_environment(vcvars: Path, vcvars_ver: str | None = N
     return env
 
 
+def _prepend_path(path: Path) -> None:
+    current = os.environ.get("PATH", "")
+    item = str(path)
+    parts = current.split(os.pathsep) if current else []
+    if item.lower() not in {p.lower() for p in parts}:
+        os.environ["PATH"] = item + (os.pathsep + current if current else "")
+
+
 def _bootstrap_msvc_environment() -> None:
     if platform.system() != "Windows":
         return
 
-    vcvars, selector = _select_windows_toolchain()
+    vcvars, selector, full_version, toolset_root = _select_windows_toolchain()
+
+    # Ask vcvars to populate Windows SDK/CRT/INCLUDE/LIB. We then force the exact
+    # v143 binary directory into PATH ourselves. This avoids relying on vcvars'
+    # PATH selection when v145 and v143 coexist inside VS 2026 Build Tools.
     env = _run_vcvars_and_capture_environment(vcvars, selector)
     os.environ.update(env)
+
+    bin_dir = toolset_root / "bin" / "Hostx64" / "x64"
+    cl_path = bin_dir / "cl.exe"
+    link_path = bin_dir / "link.exe"
+    if not cl_path.is_file() or not link_path.is_file():
+        raise RuntimeError(
+            "Znaleziono zgodny toolset, ale brakuje jego binarek x64.\n"
+            f"Toolset: {toolset_root}\n"
+            f"Oczekiwano: {cl_path}\n"
+            f"Oczekiwano: {link_path}\n"
+            "W Visual Studio Installer doinstaluj pełny komponent "
+            "'MSVC v143 - VS 2022 C++ x64/x86 build tools'."
+        )
+
+    _prepend_path(bin_dir)
+    # Explicitly expose selected toolset to build systems that inspect these vars.
+    os.environ["VCToolsInstallDir"] = str(toolset_root) + os.sep
+    os.environ["VCToolsVersion"] = full_version
+    os.environ["DISTUTILS_USE_SDK"] = "1"
+    os.environ["MSSdk"] = "1"
 
     cl = shutil.which("cl.exe")
     link = shutil.which("link.exe")
     if not cl or not link:
         raise RuntimeError(
-            f"Uruchomiono {vcvars} dla MSVC {selector}, ale nadal brakuje cl.exe/link.exe."
+            "Wewnętrzny błąd konfiguracji PATH: binarki istnieją, ale system ich nie widzi.\n"
+            f"bin_dir={bin_dir}\nPATH={os.environ.get('PATH', '')}"
         )
 
-    # Protect against vcvars silently falling back to the VS2026 default.
     cl_lower = cl.lower().replace("/", "\\")
     m = re.search(r"\\msvc\\(\d+)\.(\d+)", cl_lower)
     if m and (int(m.group(1)), int(m.group(2))) >= (14, 50):
         raise RuntimeError(
-            f"vcvars miał wybrać MSVC {selector}, ale wybrał nieobsługiwany kompilator: {cl}"
+            f"Wybrano nieobsługiwany kompilator mimo wymuszenia v143: {cl}"
         )
 
-    os.environ["DISTUTILS_USE_SDK"] = "1"
-    os.environ["MSSdk"] = "1"
-    print(f"[NATIVE BUILD] MSVC selector: {selector}")
+    print(f"[NATIVE BUILD] MSVC selector: {selector} ({full_version})")
     print(f"[NATIVE BUILD] cl.exe: {cl}")
+    print(f"[NATIVE BUILD] link.exe: {link}")
 
 
 def _require_environment() -> None:
@@ -266,7 +296,7 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-gencode=arch=compute_120,code=sm_120",
         ]
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v6",
+            name="connect6_cuda_championship_sm120_v7",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
