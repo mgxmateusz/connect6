@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
-from connect6.bots.gpu_bot import GPUTacticalBot
+from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2
 
 
 pytestmark = pytest.mark.skipif(
@@ -11,40 +11,50 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _action(board: torch.Tensor, player: int = 1, stones_left: int = 1) -> int:
-    bot = GPUTacticalBot("cuda")
+@pytest.fixture(params=[GPUTacticalBot, GPUTacticalBotV2], ids=["v1", "v2"])
+def bot_cls(request):
+    return request.param
+
+
+def _action(
+    board: torch.Tensor,
+    bot_cls,
+    player: int = 1,
+    stones_left: int = 1,
+) -> int:
+    bot = bot_cls("cuda")
     boards = board.to(device="cuda", dtype=torch.int8).unsqueeze(0)
     players = torch.tensor([player], dtype=torch.int8, device="cuda")
     left = torch.tensor([stones_left], dtype=torch.int8, device="cuda")
     return int(bot.actions(boards, players, left)[0].item())
 
 
-def test_gpu_bot_prefers_centre_on_empty_board():
+def test_gpu_bots_prefer_centre_on_empty_board(bot_cls):
     board = torch.zeros((19, 19), dtype=torch.int8)
-    assert _action(board) == 9 * 19 + 9
+    assert _action(board, bot_cls) == 9 * 19 + 9
 
 
-def test_gpu_bot_takes_immediate_win():
+def test_gpu_bots_take_immediate_win(bot_cls):
     board = torch.zeros((19, 19), dtype=torch.int8)
     board[9, 4:9] = 1
-    action = _action(board, player=1, stones_left=1)
+    action = _action(board, bot_cls, player=1, stones_left=1)
     assert action in {9 * 19 + 3, 9 * 19 + 9}
 
 
-def test_gpu_bot_blocks_immediate_loss():
+def test_gpu_bots_block_immediate_loss(bot_cls):
     board = torch.zeros((19, 19), dtype=torch.int8)
     board[10, 4:9] = -1
-    action = _action(board, player=1, stones_left=1)
+    action = _action(board, bot_cls, player=1, stones_left=1)
     assert action in {10 * 19 + 3, 10 * 19 + 9}
 
 
-def test_gpu_bot_first_stone_sets_up_two_stone_win():
+def test_gpu_bots_first_stone_sets_up_two_stone_win(bot_cls):
     board = torch.zeros((19, 19), dtype=torch.int8)
     board[8, 6:10] = 1
-    first = _action(board, player=1, stones_left=2)
+    first = _action(board, bot_cls, player=1, stones_left=2)
     r, c = divmod(first, 19)
     board[r, c] = 1
-    second = _action(board, player=1, stones_left=1)
+    second = _action(board, bot_cls, player=1, stones_left=1)
     rr, cc = divmod(second, 19)
     board[rr, cc] = 1
 
