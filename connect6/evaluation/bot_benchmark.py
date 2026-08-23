@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 
 from .checkpoint import load_model_for_inference
-from .gpu_bot import GPUTacticalBot
+from .gpu_bot import GPUTacticalBot, GPUTacticalBotV2
 from .model import mask_logits
 from .vector_env import canonical_network_input
 
@@ -32,14 +32,11 @@ def _parse_batch_sizes(raw: str) -> list[int]:
 
 
 def _make_positions(batch: int, device: torch.device, occupied_fraction: float):
-    # Fixed random GPU-resident positions. Timing does not include generating data.
     rnd = torch.rand((batch, 19, 19), device=device)
     half = occupied_fraction * 0.5
     boards = torch.zeros((batch, 19, 19), dtype=torch.int8, device=device)
     boards[rnd < half] = 1
     boards[(rnd >= half) & (rnd < occupied_fraction)] = -1
-
-    # Always leave the centre legal so every synthetic board has a legal action.
     boards[:, 9, 9] = 0
     ids = torch.arange(batch, device=device)
     current_player = torch.where(
@@ -72,7 +69,7 @@ def _elapsed_ms(fn, warmup: int, iterations: int) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="GPU decision benchmark: CNN policy vs one-pass tactical bot"
+        description="GPU decision benchmark: CNN policy vs Tactical Bot V1/V2"
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
@@ -90,18 +87,20 @@ def main() -> None:
     device = torch.device("cuda")
     checkpoint = args.checkpoint or _find_checkpoint(args.runs_dir)
     model, payload = load_model_for_inference(checkpoint, device)
-    bot = GPUTacticalBot(device)
+    bot_v1 = GPUTacticalBot(device)
+    bot_v2 = GPUTacticalBotV2(device)
 
     tr_cfg = payload.get("config", {}).get("training", {})
     amp_enabled = bool(tr_cfg.get("amp", True))
     amp_name = str(tr_cfg.get("amp_dtype", "bfloat16")).lower()
     amp_dtype = torch.float16 if amp_name in {"float16", "fp16", "half"} else torch.bfloat16
 
-    # Compile/load the native bot before any timed region.
+    # V1 and V2 share one native extension; compile/load it outside timings.
     seed_board = torch.zeros((1, 19, 19), dtype=torch.int8, device=device)
     seed_player = torch.ones(1, dtype=torch.int8, device=device)
     seed_left = torch.ones(1, dtype=torch.int8, device=device)
-    bot.actions(seed_board, seed_player, seed_left)
+    bot_v1.actions(seed_board, seed_player, seed_left)
+    bot_v2.actions(seed_board, seed_player, seed_left)
     torch.cuda.synchronize()
 
     print(f"GPU: {torch.cuda.get_device_name(device)}")
@@ -110,13 +109,13 @@ def main() -> None:
         "CNN timing: board -> canonical input -> forward -> legal mask -> argmax "
         f"(autocast={'on' if amp_enabled else 'off'}, dtype={amp_name})"
     )
-    print("Bot timing: board -> one native CUDA threat-scoring kernel -> argmax")
+    print("Bot timing: board -> one native CUDA scoring kernel -> argmax")
     print()
     print(
-        f"{'batch':>7} | {'CNN ms':>10} | {'BOT ms':>10} | "
-        f"{'BOT faster':>11} | {'CNN pos/s':>12} | {'BOT pos/s':>12}"
+        f"{'batch':>7} | {'CNN ms':>10} | {'V1 ms':>10} | {'V2 ms':>10} | "
+        f"{'V1 faster':>10} | {'V2 faster':>10} | {'V2/V1':>8} | {'V2 pos/s':>12}"
     )
-    print("-" * 77)
+    print("-" * 101)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left = _make_positions(batch, device, args.occupied)
@@ -133,18 +132,23 @@ def main() -> None:
             logits = mask_logits(logits.float(), legal)
             return logits.argmax(dim=1)
 
-        def bot_decision():
-            return bot.actions(boards, players, left)
+        def bot_v1_decision():
+            return bot_v1.actions(boards, players, left)
+
+        def bot_v2_decision():
+            return bot_v2.actions(boards, players, left)
 
         model_ms = _elapsed_ms(model_decision, args.warmup, args.iters)
-        bot_ms = _elapsed_ms(bot_decision, args.warmup, args.iters)
-        speedup = model_ms / bot_ms if bot_ms > 0 else float("inf")
-        model_rate = batch * 1000.0 / model_ms
-        bot_rate = batch * 1000.0 / bot_ms
+        v1_ms = _elapsed_ms(bot_v1_decision, args.warmup, args.iters)
+        v2_ms = _elapsed_ms(bot_v2_decision, args.warmup, args.iters)
+        v1_speedup = model_ms / v1_ms if v1_ms > 0 else float("inf")
+        v2_speedup = model_ms / v2_ms if v2_ms > 0 else float("inf")
+        v2_over_v1 = v2_ms / v1_ms if v1_ms > 0 else float("inf")
+        v2_rate = batch * 1000.0 / v2_ms
 
         print(
-            f"{batch:7d} | {model_ms:10.4f} | {bot_ms:10.4f} | "
-            f"{speedup:10.2f}x | {model_rate:12,.0f} | {bot_rate:12,.0f}"
+            f"{batch:7d} | {model_ms:10.4f} | {v1_ms:10.4f} | {v2_ms:10.4f} | "
+            f"{v1_speedup:9.2f}x | {v2_speedup:9.2f}x | {v2_over_v1:8.2f} | {v2_rate:12,.0f}"
         )
 
 
