@@ -320,6 +320,7 @@ def load_native_championship_extension(*, verbose: bool = True):
         cflags = ["/O2", "/std:c++17"] if platform.system() == "Windows" else ["-O3", "-std=c++17"]
         cuda_flags = [
             "-O3",
+            "-DUSE_CUDA",
             "--use_fast_math",
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
@@ -328,7 +329,7 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-gencode=arch=compute_120,code=sm_120",
         ]
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v9",
+            name="connect6_cuda_championship_sm120_v10",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
