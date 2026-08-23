@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,52 +15,51 @@ from torch.utils.cpp_extension import CUDA_HOME, load
 _EXTENSION = None
 
 
-def _find_vcvars64() -> Path | None:
-    """Znajduje vcvars64.bat dla zainstalowanego Visual Studio/Build Tools."""
+def _find_vcvars64_candidates() -> list[Path]:
+    """Find all vcvars64.bat installations visible to Visual Studio Installer."""
     candidates: list[Path] = []
-
-    # Najpewniejsza ścieżka: vswhere instalowany razem z Visual Studio Installer.
     pf86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
     vswhere = Path(pf86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
-    if vswhere.exists():
+
+    if vswhere.is_file():
         try:
-            result = subprocess.run(
+            proc = subprocess.run(
                 [
                     str(vswhere),
-                    "-latest",
+                    "-all",
                     "-products",
                     "*",
-                    "-requires",
-                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
                     "-property",
                     "installationPath",
                 ],
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=10,
             )
-            install = result.stdout.strip()
-            if install:
-                candidates.append(
-                    Path(install) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
-                )
+            for raw in proc.stdout.splitlines():
+                install = raw.strip()
+                if install:
+                    candidates.append(
+                        Path(install) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+                    )
         except OSError:
             pass
 
-    # Fallback dla systemów bez działającego vswhere oraz dla kilku generacji VS.
     roots = [
         Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Microsoft Visual Studio",
         Path(pf86) / "Microsoft Visual Studio",
     ]
     editions = ("BuildTools", "Community", "Professional", "Enterprise")
     for root in roots:
-        for year in ("18", "2026", "2022", "2019"):
+        for version in ("18", "2026", "2022", "2019"):
             for edition in editions:
                 candidates.append(
-                    root / year / edition / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+                    root / version / edition / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
                 )
 
+    result: list[Path] = []
     seen: set[str] = set()
     for path in candidates:
         key = str(path).lower()
@@ -67,16 +67,78 @@ def _find_vcvars64() -> Path | None:
             continue
         seen.add(key)
         if path.is_file():
-            return path
-    return None
+            result.append(path)
+    return result
 
 
-def _run_vcvars_and_capture_environment(vcvars: Path) -> dict[str, str]:
-    """Uruchamia vcvars64.bat przez tymczasowy .cmd, bez kruchego cmd quoting."""
+def _installed_msvc_toolsets(vcvars: Path) -> list[tuple[tuple[int, int], str]]:
+    """Return installed toolsets, newest first: ((14, 44), '14.44.xxxxx')."""
+    # ...\VC\Auxiliary\Build\vcvars64.bat -> ...\VC
+    vc_root = vcvars.parents[2]
+    toolsets_root = vc_root / "Tools" / "MSVC"
+    if not toolsets_root.is_dir():
+        return []
+
+    out: list[tuple[tuple[int, int], str]] = []
+    for child in toolsets_root.iterdir():
+        if not child.is_dir():
+            continue
+        m = re.match(r"^(\d+)\.(\d+)(?:\.|$)", child.name)
+        if not m:
+            continue
+        out.append(((int(m.group(1)), int(m.group(2))), child.name))
+    out.sort(reverse=True)
+    return out
+
+
+def _select_windows_toolchain() -> tuple[Path, str]:
+    """Select the newest MSVC accepted by CUDA 12.x.
+
+    CUDA 12.9 rejects the VS 2026 v145 toolset (MSVC 14.50+).  A v143
+    toolset can coexist inside Build Tools 2026, so prefer newest 14.3x/14.4x.
+    """
+    installations = _find_vcvars64_candidates()
+    if not installations:
+        raise RuntimeError(
+            "Nie znaleziono Visual Studio Build Tools. Zainstaluj workload "
+            "'Programowanie aplikacji klasycznych w języku C++'."
+        )
+
+    compatible: list[tuple[tuple[int, int], str, Path]] = []
+    detected: list[str] = []
+    for vcvars in installations:
+        toolsets = _installed_msvc_toolsets(vcvars)
+        if toolsets:
+            detected.append(f"{vcvars.parent.parent.parent}: " + ", ".join(v for _, v in toolsets))
+        for key, full_version in toolsets:
+            # VS2017..VS2022 family accepted by CUDA 12.9.  In practice the
+            # important upper bound here is MSVC < 14.50; 14.5x is VS2026.
+            if (14, 10) <= key < (14, 50):
+                compatible.append((key, full_version, vcvars))
+
+    if not compatible:
+        details = "\n".join(detected) if detected else "(nie wykryto katalogów MSVC)"
+        raise RuntimeError(
+            "CUDA 12.9 nie obsługuje zainstalowanego MSVC 14.50+/Visual Studio 2026.\n"
+            "W Visual Studio Installer -> Build Tools 2026 -> Modyfikuj -> "
+            "Pojedyncze składniki zaznacz: 'MSVC v143 - VS 2022 C++ x64/x86 build tools'.\n"
+            "Nie musisz usuwać MSVC 14.51 ani instalować całego Visual Studio 2022.\n"
+            f"Wykryte toolsety:\n{details}"
+        )
+
+    compatible.sort(reverse=True, key=lambda x: x[0])
+    key, full_version, vcvars = compatible[0]
+    # vcvars accepts a major.minor selector, e.g. -vcvars_ver=14.44.
+    selector = f"{key[0]}.{key[1]}"
+    return vcvars, selector
+
+
+def _run_vcvars_and_capture_environment(vcvars: Path, vcvars_ver: str | None = None) -> dict[str, str]:
     marker = "__CONNECT6_ENV_BEGIN__"
+    args = f" -vcvars_ver={vcvars_ver}" if vcvars_ver else ""
     script = (
         "@echo off\r\n"
-        f'call "{vcvars}"\r\n'
+        f'call "{vcvars}"{args}\r\n'
         "if errorlevel 1 exit /b %errorlevel%\r\n"
         f"echo {marker}\r\n"
         "set\r\n"
@@ -114,7 +176,7 @@ def _run_vcvars_and_capture_environment(vcvars: Path) -> dict[str, str]:
     combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     if proc.returncode != 0:
         raise RuntimeError(
-            "vcvars64.bat zwrócił błąd. Pełny output:\n"
+            f"vcvars64.bat (-vcvars_ver={vcvars_ver}) zwrócił błąd:\n"
             + (combined if combined else "(brak komunikatu)")
         )
 
@@ -122,54 +184,42 @@ def _run_vcvars_and_capture_environment(vcvars: Path) -> dict[str, str]:
     try:
         start = lines.index(marker) + 1
     except ValueError as exc:
-        raise RuntimeError(
-            "vcvars64.bat zakończył się bez błędu, ale nie udało się odczytać "
-            f"środowiska. Output:\n{combined}"
-        ) from exc
+        raise RuntimeError(f"Nie udało się odczytać środowiska MSVC. Output:\n{combined}") from exc
 
     env: dict[str, str] = {}
     for line in lines[start:]:
-        if not line or line.startswith("=") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key:
+        if line and not line.startswith("=") and "=" in line:
+            key, value = line.split("=", 1)
             env[key] = value
     return env
 
 
 def _bootstrap_msvc_environment() -> None:
-    """Udostępnia cl/link/Windows SDK w zwykłym PowerShellu.
-
-    PyTorch cpp_extension zakłada na Windows, że środowisko MSVC jest już
-    skonfigurowane. Zamiast wymagać uruchamiania Developer PowerShell, sami
-    wykonujemy vcvars64.bat i importujemy jego zmienne do bieżącego procesu.
-    """
     if platform.system() != "Windows":
         return
-    if shutil.which("cl.exe") and shutil.which("link.exe"):
-        return
 
-    vcvars = _find_vcvars64()
-    if vcvars is None:
-        raise RuntimeError(
-            "Nie znaleziono kompilatora MSVC (cl.exe). Zainstaluj Visual Studio "
-            "Build Tools z workloadem 'Desktop development with C++' "
-            "(Microsoft.VisualStudio.Workload.VCTools), razem z x64 MSVC i Windows SDK."
-        )
-
-    env = _run_vcvars_and_capture_environment(vcvars)
+    vcvars, selector = _select_windows_toolchain()
+    env = _run_vcvars_and_capture_environment(vcvars, selector)
     os.environ.update(env)
 
     cl = shutil.which("cl.exe")
     link = shutil.which("link.exe")
     if not cl or not link:
         raise RuntimeError(
-            f"Znaleziono i uruchomiono {vcvars}, ale po vcvars64.bat nadal brakuje "
-            "cl.exe/link.exe. W Visual Studio Installer doinstaluj workload "
-            "'Desktop development with C++' wraz z MSVC x64/x86 i Windows SDK."
+            f"Uruchomiono {vcvars} dla MSVC {selector}, ale nadal brakuje cl.exe/link.exe."
         )
 
-    print(f"[NATIVE BUILD] MSVC environment: {vcvars}")
+    # Protect against vcvars silently falling back to the VS2026 default.
+    cl_lower = cl.lower().replace("/", "\\")
+    m = re.search(r"\\msvc\\(\d+)\.(\d+)", cl_lower)
+    if m and (int(m.group(1)), int(m.group(2))) >= (14, 50):
+        raise RuntimeError(
+            f"vcvars miał wybrać MSVC {selector}, ale wybrał nieobsługiwany kompilator: {cl}"
+        )
+
+    os.environ["DISTUTILS_USE_SDK"] = "1"
+    os.environ["MSSdk"] = "1"
+    print(f"[NATIVE BUILD] MSVC selector: {selector}")
     print(f"[NATIVE BUILD] cl.exe: {cl}")
 
 
@@ -179,11 +229,13 @@ def _require_environment() -> None:
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) != (12, 0):
         raise RuntimeError(
-            f"Native championship jest zoptymalizowany pod SM120/RTX 50; wykryto compute capability {major}.{minor}."
+            f"Native championship jest zoptymalizowany pod SM120/RTX 50; "
+            f"wykryto compute capability {major}.{minor}."
         )
     if CUDA_HOME is None:
         raise RuntimeError(
-            "Nie znaleziono CUDA Toolkit/NVCC. Zainstaluj CUDA Toolkit 12.8+; sam wheel PyTorch CUDA nie wystarcza do kompilacji rozszerzenia."
+            "Nie znaleziono CUDA Toolkit/NVCC. Zainstaluj CUDA Toolkit 12.8+; "
+            "sam wheel PyTorch CUDA nie wystarcza do kompilacji rozszerzenia."
         )
     _bootstrap_msvc_environment()
 
@@ -200,8 +252,6 @@ def load_native_championship_extension(*, verbose: bool = True):
         str(root / "native_championship_kernel.cu"),
     ]
 
-    # PyTorch cache'uje wynik kompilacji, więc NVCC uruchamia się tylko po zmianie
-    # źródeł/wersji. Wymuszamy SM120 zamiast generować zbędne warianty PTX/SASS.
     old_arch = os.environ.get("TORCH_CUDA_ARCH_LIST")
     os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0"
     try:
@@ -216,7 +266,7 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-gencode=arch=compute_120,code=sm_120",
         ]
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v5",
+            name="connect6_cuda_championship_sm120_v6",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
