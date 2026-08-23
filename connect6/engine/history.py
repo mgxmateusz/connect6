@@ -115,6 +115,42 @@ def _load_lean_checkpoint(path: Path) -> HistoricalCheckpoint:
     )
 
 
+def _recent_slice(candidates: list[Path], fraction: float) -> list[Path]:
+    if not candidates:
+        return []
+    count = max(1, int((len(candidates) * float(fraction)) + 0.999999))
+    return candidates[-count:]
+
+
+def _sample_weighted_history_paths(
+    candidates: list[Path], requested_count: int
+) -> list[Path]:
+    """Losuje z powtórzeniami: 50% całość, 25% ostatnia połowa, 25% ostatnia ćwiartka.
+
+    Każdy slot wykonuje niezależne losowanie bucketa, więc w długim okresie
+    rozkład jest identyczny z trzema osobnymi pulami 50/25/25, ale nie wymaga
+    wymuszania dokładnych liczebności ani sprawdzania duplikatów.
+    """
+    if requested_count <= 0 or not candidates:
+        return []
+
+    ordered = sorted(candidates, key=lambda p: checkpoint_update(p) or -1)
+    recent_half = _recent_slice(ordered, 0.50)
+    recent_quarter = _recent_slice(ordered, 0.25)
+
+    sampled: list[Path] = []
+    for _ in range(int(requested_count)):
+        bucket_roll = random.random()
+        if bucket_roll < 0.50:
+            pool = ordered
+        elif bucket_roll < 0.75:
+            pool = recent_half
+        else:
+            pool = recent_quarter
+        sampled.append(random.choice(pool))
+    return sampled
+
+
 def load_random_historical_checkpoints(
     checkpoint_dir: str | Path,
     *,
@@ -149,16 +185,17 @@ def load_random_historical_checkpoints(
         update = checkpoint_update(path)
         if update is not None and update < int(current_update):
             candidates.append(Path(path))
-    random.shuffle(candidates)
+
+    selected_paths = _sample_weighted_history_paths(candidates, requested_count)
+    if not selected_paths:
+        return []
 
     family_model = required_model
     family_board = required_board_size
     family_win = required_win_length
 
     loaded: list[HistoricalCheckpoint] = []
-    for path in candidates:
-        if len(loaded) >= requested_count:
-            break
+    for path in selected_paths:
         try:
             checkpoint = ram_cache.get(path) if ram_cache is not None else _load_lean_checkpoint(path)
         except (RuntimeError, KeyError, ValueError, OSError) as exc:
@@ -168,7 +205,7 @@ def load_random_historical_checkpoints(
         cfg = _normalized_model_cfg(checkpoint.model_config)
         board_size = int(checkpoint.game_config["board_size"])
         win_length = int(checkpoint.game_config.get("win_length", 6))
-        if int(cfg.get("architecture_version", 0)) != 4:
+        if int(cfg.get("architecture_version", 0)) != 5:
             continue
 
         if family_model is None:
@@ -184,13 +221,15 @@ def load_random_historical_checkpoints(
 
 
 class HistoricalPolicyEnsemble:
-    """Wiele zamrożonych polityk CNN liczonych jednym grouped-conv na warstwę.
+    """Wiele zamrożonych polityk CNN liczonych grupowanymi konwolucjami na GPU.
 
-    Wejście ma [MODELE, STOŁY, 3, H, W]. Dla każdej warstwy modele są składane
-    w grupy kanałów i wykonywany jest jeden F.conv2d(groups=MODELE), dzięki czemu
-    zachowujemy wcześniejszą zaletę: brak pętli małych forwardów model-po-modelu.
-    Liczona jest wyłącznie policy; historyczne VALUE nie jest potrzebne.
+    Wejście ma [MODELE, STOŁY, 4, H, W]. Dla każdej warstwy modele są składane
+    w grupy kanałów i wykonywany jest jeden F.conv2d(groups=MODELE). Następnie
+    wykonywany jest GroupNorm z ośmioma kanałami na grupę oraz SiLU. Liczona
+    jest wyłącznie policy; historyczne VALUE nie jest potrzebne.
     """
+
+    CHANNELS_PER_GROUP = 8
 
     def __init__(
         self,
@@ -213,7 +252,13 @@ class HistoricalPolicyEnsemble:
         self.board_size = int(first_game["board_size"])
         self.kernels = tuple(int(v) for v in first_cfg.get("kernels", (23, 3, 3, 3, 3, 3, 3, 3)))
         self.channels = tuple(int(v) for v in first_cfg.get("channels", (32, 32, 64, 64, 64, 96, 96, 96)))
-        self.input_channels = 3
+        self.input_channels = 4
+        self.norm_groups = tuple(c // self.CHANNELS_PER_GROUP for c in self.channels)
+
+        if int(first_cfg.get("architecture_version", 0)) != 5:
+            raise ValueError("History ensemble obsługuje wyłącznie architecture_version=5")
+        if any(c % self.CHANNELS_PER_GROUP != 0 for c in self.channels):
+            raise ValueError("Historyczne kanały muszą być podzielne przez 8 dla GroupNorm")
 
         for cp in checkpoints[1:]:
             if int(cp.game_config["board_size"]) != self.board_size:
@@ -224,9 +269,13 @@ class HistoricalPolicyEnsemble:
         states = [cp.model_state for cp in checkpoints]
         self.conv_weights: list[torch.Tensor] = []
         self.conv_biases: list[torch.Tensor | None] = []
+        self.norm_weights: list[torch.Tensor] = []
+        self.norm_biases: list[torch.Tensor] = []
         for i in range(len(self.kernels)):
             self.conv_weights.append(self._stack(states, f"convs.{i}.weight"))
             self.conv_biases.append(self._stack_optional(states, f"convs.{i}.bias"))
+            self.norm_weights.append(self._stack(states, f"norms.{i}.weight"))
+            self.norm_biases.append(self._stack(states, f"norms.{i}.bias"))
 
         self.policy_weight = self._stack(states, "policy_output.weight")
         self.policy_bias = self._stack_optional(states, "policy_output.bias")
@@ -273,10 +322,32 @@ class HistoricalPolicyEnsemble:
         )
         return y.reshape(t, m, out_channels, h, w).permute(1, 0, 2, 3, 4)
 
+    def _group_norm(
+        self,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor,
+        groups: int,
+    ) -> torch.Tensor:
+        # GroupNorm normalizuje każdą próbkę niezależnie, więc M i T można
+        # bezpiecznie złożyć w batch. Affine pozostaje osobne dla każdego modelu.
+        m, t, c, h, w = x.shape
+        y = F.group_norm(
+            x.reshape(m * t, c, h, w),
+            num_groups=int(groups),
+            weight=None,
+            bias=None,
+            eps=1e-5,
+        ).reshape(m, t, c, h, w)
+        return (
+            y * weight[:, None, :, None, None]
+            + bias[:, None, :, None, None]
+        )
+
     def forward_grouped(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 5:
             raise ValueError(
-                "History ensemble oczekuje wejścia [MODELE, STOŁY, 3, H, W]"
+                "History ensemble oczekuje wejścia [MODELE, STOŁY, 4, H, W]"
             )
         expected_tail = (self.input_channels, self.board_size, self.board_size)
         if x.shape[0] != self.num_models or tuple(x.shape[2:]) != expected_tail:
@@ -288,10 +359,16 @@ class HistoricalPolicyEnsemble:
         if x.device != self.device or x.dtype != self.dtype:
             x = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
 
-        for kernel, weight, bias in zip(
-            self.kernels, self.conv_weights, self.conv_biases
+        for kernel, weight, conv_bias, norm_weight, norm_bias, groups in zip(
+            self.kernels,
+            self.conv_weights,
+            self.conv_biases,
+            self.norm_weights,
+            self.norm_biases,
+            self.norm_groups,
         ):
-            x = self._grouped_conv(x, weight, bias, kernel // 2)
+            x = self._grouped_conv(x, weight, conv_bias, kernel // 2)
+            x = self._group_norm(x, norm_weight, norm_bias, groups)
             x = F.silu(x)
 
         logits = self._grouped_conv(
