@@ -15,12 +15,7 @@ _BOT_EXTENSION = None
 
 
 def load_native_bot_extension(*, verbose: bool = False):
-    """Build/load the tiny CUDA extension used by the tactical bot.
-
-    Unlike the championship extension this kernel does not depend on SM120
-    tensor-core instructions, so it is compiled for the currently selected
-    CUDA device capability.
-    """
+    """Build/load the native CUDA extension used by the tactical bot."""
     global _BOT_EXTENSION
     if _BOT_EXTENSION is not None:
         return _BOT_EXTENSION
@@ -47,19 +42,16 @@ def load_native_bot_extension(*, verbose: bool = False):
         str(root / "native_bot_kernel.cu"),
     ]
 
-    # v2 intentionally uses a fresh build directory. A killed first-time
-    # torch extension build can leave PyTorch's empty `lock` file behind and
-    # every later process then waits forever without printing an error.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v2"
+    # v3: the CUDA translation unit intentionally contains no Torch headers.
+    # This avoids an NVCC/MSVC ambiguity in PyTorch's compiled_autograd headers
+    # on CUDA 12.9 + VS2026/v143 while keeping the Python/Torch binding in .cpp.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v3"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
 
     lock_file = build_directory / "lock"
     if lock_file.exists():
-        # This application never intentionally compiles the same bot extension
-        # concurrently. Treat a pre-existing lock at process startup as stale
-        # (typically left by Ctrl+C / closing the GUI during NVCC compilation).
         try:
             lock_file.unlink()
             print(f"[BOT BUILD] Removed stale build lock: {lock_file}", flush=True)
