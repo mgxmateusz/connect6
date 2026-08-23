@@ -1,4 +1,4 @@
-from connect6.bot_benchmark import main
+from connect6.evaluation.bot_benchmark import main
 
 
 if __name__ == "__main__":

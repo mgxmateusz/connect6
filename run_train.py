@@ -1,6 +1,6 @@
 import torch
 
-from connect6.train import main
+from connect6.engine.train import main
 
 
 _CUDA_RESERVED_CACHE_LIMIT_BYTES = 10_000_000_000

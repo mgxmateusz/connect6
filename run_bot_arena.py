@@ -1,4 +1,4 @@
-from connect6.bot_arena import main
+from connect6.championship.bot_arena import main
 
 
 if __name__ == "__main__":

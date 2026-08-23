@@ -1,4 +1,5 @@
-from connect6.evaluate import main
+from connect6.evaluation.evaluate import main
+
 
 if __name__ == "__main__":
     main()
