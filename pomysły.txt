@@ -22,7 +22,6 @@
 5. Zmienić silnik gry by zbieranie doświadczeń odbywało się na gpu, podobnie jak w championsach, ale ogólna poprawa wydajności procesu uczenia.
 
 
-6. Walka przeciwko botowi (1/8 stołów)
-Dodać kilka stołów by grało przeciwko prostemu botowi, bot ma działać normalnie na GPU, nie być uczącym się modelem. Prosty matematyczny i regularny bot. Deterministyczny evaluator 361 pól, nie jako klasyczne drzewko decyzyjne. Musi być bardzo GPU friendly.
+6. Walka przeciwko botowi (1/4 stołów)
+z czego 50% - v1 i 50% v2
 
-7. 
