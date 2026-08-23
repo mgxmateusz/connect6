@@ -1,4 +1,4 @@
-from connect6.championship.bot_arena import _result_from_winner, _summary
+from connect6.championship.bot_arena import BOT_SPECS, _result_from_winner, _summary
 
 
 def _row(update, black, white):
@@ -35,6 +35,13 @@ def test_result_from_winner_respects_model_colour():
     assert _result_from_winner(0, model_is_black=True) == "DRAW"
 
 
+def test_dual_bot_registry_has_stable_v1_and_v2():
+    assert [spec.key for spec in BOT_SPECS] == ["v1", "v2"]
+    assert BOT_SPECS[0].signature != BOT_SPECS[1].signature
+    assert BOT_SPECS[0].label.endswith("V1")
+    assert BOT_SPECS[1].label.endswith("V2")
+
+
 def test_summary_colour_stats_and_stable_threshold():
     rows = [
         _row(10, "LOSS", "LOSS"),
@@ -42,8 +49,9 @@ def test_summary_colour_stats_and_stable_threshold():
         _row(30, "WIN", "WIN"),
         _row(40, "WIN", "DRAW"),
     ]
-    summary = _summary(rows)
+    summary = _summary(rows, bot_signature="test-bot-v2")
 
+    assert summary["bot_signature"] == "test-bot-v2"
     assert summary["models"] == 4
     assert summary["games"] == 8
     assert summary["bot_wins"] == 3
