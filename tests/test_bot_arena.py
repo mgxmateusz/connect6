@@ -1,4 +1,4 @@
-from connect6.bot_arena import _result_from_winner, _summary
+from connect6.championship.bot_arena import _result_from_winner, _summary
 
 
 def _row(update, black, white):
@@ -54,7 +54,5 @@ def test_summary_colour_stats_and_stable_threshold():
     assert summary["last_bot_win_update"] == 20
     assert summary["stable_no_bot_win_from_update"] == 30
 
-    # Bot black is the game where the model is white.
     assert summary["bot_as_black"]["wins"] == 2
-    # Bot white is the game where the model is black.
     assert summary["bot_as_white"]["wins"] == 1

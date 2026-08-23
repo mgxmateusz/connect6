@@ -3,9 +3,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from connect6.history import HistoricalCheckpoint, HistoricalPolicyEnsemble
-from connect6.model import build_model
-from connect6.train import (
+from connect6.engine.history import HistoricalCheckpoint, HistoricalPolicyEnsemble
+from connect6.engine.model import build_model
+from connect6.engine.train import (
     CompleteGameBuffer,
     _forced_random_opening_mask,
     _historical_layout,

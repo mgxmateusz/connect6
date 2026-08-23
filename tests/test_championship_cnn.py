@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from connect6.championship_cnn import AdaptiveTableController, _black_to_move
+from connect6.championship.championship_cnn import AdaptiveTableController, _black_to_move
 
 
 def test_connect6_move_schedule() -> None:
-    # Pierwszy kamień czarnych, potem po dwa kamienie na turę.
     expected_black = [
-        True,   # B
-        False,  # W
-        False,  # W
-        True,   # B
-        True,   # B
-        False,  # W
-        False,  # W
-        True,   # B
-        True,   # B
+        True,
+        False,
+        False,
+        True,
+        True,
+        False,
+        False,
+        True,
+        True,
     ]
     assert [_black_to_move(i) for i in range(len(expected_black))] == expected_black
 

@@ -1,7 +1,7 @@
 import torch
 
-from connect6.model import PolicyValueNet, build_model
-from connect6.train import (
+from connect6.engine.model import PolicyValueNet, build_model
+from connect6.engine.train import (
     _inverse_transform_actions,
     _transform_actions,
     _transform_boards,
