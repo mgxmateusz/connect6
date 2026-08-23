@@ -1,0 +1,13 @@
+bot_arena:
+  checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
+  output_dir: "runs/connect6_cnn_01/bot_arena"
+  device: "cuda"
+
+  # Ile różnych autosave'ów liczymy równolegle jednym grouped-conv na warstwę.
+  # RTX 5070 powinna spokojnie obsłużyć 256; w razie OOM można zejść do 128/64.
+  models_per_batch: 256
+  inference_dtype: "bfloat16"
+
+  # Hot loop pozostaje na GPU. CPU sprawdza tylko co tyle kamieni, czy wszystkie
+  # partie w danym batchu już się skończyły, żeby nie mielić do pełnych 361 ruchów.
+  sync_interval_moves: 16
