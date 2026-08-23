@@ -4,6 +4,7 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import torch
@@ -53,16 +54,87 @@ def _find_vcvars64() -> Path | None:
     ]
     editions = ("BuildTools", "Community", "Professional", "Enterprise")
     for root in roots:
-        for year in ("2026", "2022", "2019"):
+        for year in ("18", "2026", "2022", "2019"):
             for edition in editions:
                 candidates.append(
                     root / year / edition / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
                 )
 
+    seen: set[str] = set()
     for path in candidates:
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
         if path.is_file():
             return path
     return None
+
+
+def _run_vcvars_and_capture_environment(vcvars: Path) -> dict[str, str]:
+    """Uruchamia vcvars64.bat przez tymczasowy .cmd, bez kruchego cmd quoting."""
+    marker = "__CONNECT6_ENV_BEGIN__"
+    script = (
+        "@echo off\r\n"
+        f'call "{vcvars}"\r\n'
+        "if errorlevel 1 exit /b %errorlevel%\r\n"
+        f"echo {marker}\r\n"
+        "set\r\n"
+    )
+
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".cmd",
+            delete=False,
+            encoding="utf-8",
+            newline="",
+        ) as f:
+            f.write(script)
+            temp_path = Path(f.name)
+
+        proc = subprocess.run(
+            ["cmd.exe", "/d", "/c", str(temp_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Nie udało się uruchomić cmd.exe dla MSVC: {exc}") from exc
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "vcvars64.bat zwrócił błąd. Pełny output:\n"
+            + (combined if combined else "(brak komunikatu)")
+        )
+
+    lines = (proc.stdout or "").splitlines()
+    try:
+        start = lines.index(marker) + 1
+    except ValueError as exc:
+        raise RuntimeError(
+            "vcvars64.bat zakończył się bez błędu, ale nie udało się odczytać "
+            f"środowiska. Output:\n{combined}"
+        ) from exc
+
+    env: dict[str, str] = {}
+    for line in lines[start:]:
+        if not line or line.startswith("=") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key:
+            env[key] = value
+    return env
 
 
 def _bootstrap_msvc_environment() -> None:
@@ -85,33 +157,20 @@ def _bootstrap_msvc_environment() -> None:
             "(Microsoft.VisualStudio.Workload.VCTools), razem z x64 MSVC i Windows SDK."
         )
 
-    command = f'call "{vcvars}" >nul && set'
-    try:
-        proc = subprocess.run(
-            ["cmd.exe", "/d", "/s", "/c", command],
-            check=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"Nie udało się uruchomić środowiska MSVC: {vcvars}") from exc
+    env = _run_vcvars_and_capture_environment(vcvars)
+    os.environ.update(env)
 
-    for line in proc.stdout.splitlines():
-        if not line or line.startswith("=") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        if key:
-            os.environ[key] = value
-
-    if not shutil.which("cl.exe") or not shutil.which("link.exe"):
+    cl = shutil.which("cl.exe")
+    link = shutil.which("link.exe")
+    if not cl or not link:
         raise RuntimeError(
-            f"Znaleziono {vcvars}, ale po vcvars64.bat nadal brakuje cl.exe/link.exe. "
-            "W Visual Studio Installer doinstaluj workload 'Desktop development with C++'."
+            f"Znaleziono i uruchomiono {vcvars}, ale po vcvars64.bat nadal brakuje "
+            "cl.exe/link.exe. W Visual Studio Installer doinstaluj workload "
+            "'Desktop development with C++' wraz z MSVC x64/x86 i Windows SDK."
         )
 
     print(f"[NATIVE BUILD] MSVC environment: {vcvars}")
+    print(f"[NATIVE BUILD] cl.exe: {cl}")
 
 
 def _require_environment() -> None:
@@ -157,7 +216,7 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-gencode=arch=compute_120,code=sm_120",
         ]
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v4",
+            name="connect6_cuda_championship_sm120_v5",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
