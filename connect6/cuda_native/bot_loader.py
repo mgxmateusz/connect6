@@ -52,6 +52,13 @@ def load_native_bot_extension(*, verbose: bool = False):
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
 
+    print(f"[BOT BUILD] extension: {extension_name}", flush=True)
+    print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
+    print(
+        "[BOT BUILD] First use may take a while because NVCC must compile the CUDA kernel.",
+        flush=True,
+    )
+
     old_arch = os.environ.get("TORCH_CUDA_ARCH_LIST")
     os.environ["TORCH_CUDA_ARCH_LIST"] = arch
     try:
@@ -80,6 +87,7 @@ def load_native_bot_extension(*, verbose: bool = False):
             )
             ldflags.append(f"/LIBPATH:{runtime_lib}")
 
+        print("[BOT BUILD] ENTER torch.utils.cpp_extension.load()", flush=True)
         _BOT_EXTENSION = load(
             name=extension_name,
             sources=sources,
@@ -90,6 +98,7 @@ def load_native_bot_extension(*, verbose: bool = False):
             verbose=verbose,
             build_directory=str(build_directory),
         )
+        print("[BOT BUILD] EXIT torch.utils.cpp_extension.load()", flush=True)
     finally:
         if old_arch is None:
             os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
