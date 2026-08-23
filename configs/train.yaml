@@ -48,11 +48,11 @@ training:
   # --------------------------------------------------------------------------
   # PPO / CREDIT ASSIGNMENT
   # --------------------------------------------------------------------------
-  ppo_epochs: 4
+  ppo_epochs: 3
 
   minibatch_size: 1024
 
-  learning_rate: 0.00025
+  learning_rate: 0.0002
   lr_schedule: "cosine"     # constant | cosine
   weight_decay: 0.0001
   adam_eps: 0.00001
