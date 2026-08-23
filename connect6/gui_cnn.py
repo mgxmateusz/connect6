@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import threading
 import tkinter as tk
 
 import torch
@@ -14,6 +15,9 @@ from .vector_env import canonical_network_input
 class Connect6CNNGUI(Connect6GUI):
     def __init__(self, root: tk.Tk, runs_dir: str = "runs"):
         self._tactical_bot: GPUTacticalBot | None = None
+        self._bot_loading = False
+        self._bot_load_error: BaseException | None = None
+        self._bot_load_thread: threading.Thread | None = None
         super().__init__(root, runs_dir)
 
     def refresh_models(self) -> None:
@@ -34,13 +38,68 @@ class Connect6CNNGUI(Connect6GUI):
         if white_before == GPU_TACTICAL_BOT and GPU_TACTICAL_BOT in values:
             self.white_source.set(GPU_TACTICAL_BOT)
 
+    def _bot_selected(self) -> bool:
+        return GPU_TACTICAL_BOT in {
+            self.black_source.get(),
+            self.white_source.get(),
+        }
+
+    def _start_tactical_bot_loading(self) -> None:
+        if self.device.type != "cuda":
+            self._bot_load_error = RuntimeError("GPU Tactical Bot requires CUDA")
+            return
+        if self._tactical_bot is not None or self._bot_loading:
+            return
+
+        self._bot_loading = True
+        self._bot_load_error = None
+        self.status.set(
+            "Compiling/loading GPU Tactical Bot in background... "
+            "first run can take a minute; GUI remains usable."
+        )
+
+        def worker() -> None:
+            try:
+                bot = GPUTacticalBot(self.device, verbose_build=True)
+                # Force JIT compilation/load now instead of blocking the first move.
+                bot._ext()
+                self._tactical_bot = bot
+            except BaseException as exc:  # propagate to Tk thread via polling
+                self._bot_load_error = exc
+            finally:
+                self._bot_loading = False
+
+        self._bot_load_thread = threading.Thread(
+            target=worker,
+            name="connect6-gpu-bot-loader",
+            daemon=True,
+        )
+        self._bot_load_thread.start()
+        self.root.after(100, self._poll_tactical_bot_loading)
+
+    def _poll_tactical_bot_loading(self) -> None:
+        if self._bot_loading:
+            self.root.after(100, self._poll_tactical_bot_loading)
+            return
+
+        if self._bot_load_error is not None:
+            exc = self._bot_load_error
+            self._bot_load_error = None
+            self.status.set("GPU Tactical Bot build failed - see error dialog/console")
+            from tkinter import messagebox
+
+            messagebox.showerror("GPU Tactical Bot build error", str(exc))
+            return
+
+        if self._tactical_bot is not None:
+            self.status.set("GPU Tactical Bot ready")
+            self._schedule_ai_if_needed()
+
     def _get_tactical_bot(self) -> GPUTacticalBot:
         if self.device.type != "cuda":
             raise RuntimeError("GPU Tactical Bot requires CUDA")
         if self._tactical_bot is None:
-            self.status.set("Loading GPU Tactical Bot (first run may compile CUDA kernel)...")
-            self.root.update_idletasks()
-            self._tactical_bot = GPUTacticalBot(self.device)
+            raise RuntimeError("GPU Tactical Bot is still compiling/loading")
         return self._tactical_bot
 
     @torch.inference_mode()
@@ -105,6 +164,27 @@ class Connect6CNNGUI(Connect6GUI):
 
         probs = torch.softmax(logits / max(temp, 1e-4), dim=1)
         return int(torch.multinomial(probs, 1).item())
+
+    def _schedule_ai_if_needed(self) -> None:
+        self._cancel_ai_job()
+        if self.paused or self.game.done or self.current_source() == HUMAN:
+            return
+
+        if self.current_source() == GPU_TACTICAL_BOT and self._tactical_bot is None:
+            self._start_tactical_bot_loading()
+            return
+
+        self.ai_job = self.root.after(
+            max(0, int(self.delay_ms.get())),
+            self._do_ai_step,
+        )
+
+    def new_game(self) -> None:
+        super().new_game()
+        # If the bot is selected for the non-moving side, compile it in the
+        # background immediately rather than waiting until its first turn.
+        if self._bot_selected() and self._tactical_bot is None:
+            self._start_tactical_bot_loading()
 
 
 def main() -> None:
