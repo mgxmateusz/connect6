@@ -5,9 +5,10 @@ import csv
 import gc
 import html
 import json
-import math
+import shutil
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ import torch
 
 from . import championship as legacy
 from .championship_cnn import _black_to_move, _masked_step
-from .gpu_bot import GPUTacticalBot
+from .gpu_bot import GPUTacticalBot, GPUTacticalBotV2
 from .history import HistoricalPolicyEnsemble, _load_lean_checkpoint
 from .model import mask_logits
 from .native_championship import _validate_checkpoint_family
@@ -42,6 +43,20 @@ RESULT_FIELDS = [
     "bot_score_pct",
     "elapsed_seconds",
 ]
+
+
+@dataclass(frozen=True)
+class BotSpec:
+    key: str
+    label: str
+    signature: str
+    cls: type
+
+
+BOT_SPECS = (
+    BotSpec("v1", "GPU Tactical Bot V1", BOT_SIGNATURE, GPUTacticalBot),
+    BotSpec("v2", "GPU Tactical Bot V2", "gpu_tactical_bot_heuristic_v2", GPUTacticalBotV2),
+)
 
 
 def _project_root(config_path: Path) -> Path:
@@ -94,10 +109,10 @@ def _append_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def _validate_state(path: Path, *, checkpoint_dir: Path) -> None:
+def _validate_state(path: Path, *, checkpoint_dir: Path, bot_signature: str) -> None:
     expected = {
-        "format_version": 1,
-        "bot_signature": BOT_SIGNATURE,
+        "format_version": 2,
+        "bot_signature": bot_signature,
         "checkpoint_dir": str(checkpoint_dir.resolve()),
         "games_per_model": 2,
         "temperature": 0.0,
@@ -117,17 +132,11 @@ def _validate_state(path: Path, *, checkpoint_dir: Path) -> None:
 @torch.inference_mode()
 def _play_colour_game(
     ensemble: HistoricalPolicyEnsemble,
-    bot: GPUTacticalBot,
+    bot,
     *,
     model_is_black: bool,
     sync_interval_moves: int,
 ) -> tuple[list[int], list[int], float]:
-    """Play one game per model in parallel, all with the same colour assignment.
-
-    Board i is controlled by model i whenever that colour is to move. The other
-    colour is the fixed tactical CUDA bot. All board state stays on the GPU;
-    host synchronisation is only used every few moves to stop once all games ended.
-    """
     device = ensemble.device
     n = ensemble.num_models
     env = VectorConnect6(
@@ -163,9 +172,8 @@ def _play_colour_game(
         winners = torch.where(newly_done, winner, winners)
         active &= ~done
 
-        if (move_index + 1) % sync_every == 0:
-            if not bool(active.any().item()):
-                break
+        if (move_index + 1) % sync_every == 0 and not bool(active.any().item()):
+            break
 
     if bool(active.any().item()):
         raise RuntimeError("Nie wszystkie partie bot arena zakończyły się po 361 kamieniach")
@@ -173,9 +181,11 @@ def _play_colour_game(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - started
-    winner_list = [int(v) for v in winners.cpu().tolist()]
-    move_list = [int(v) for v in env.move_count.cpu().tolist()]
-    return winner_list, move_list, elapsed
+    return (
+        [int(v) for v in winners.cpu().tolist()],
+        [int(v) for v in env.move_count.cpu().tolist()],
+        elapsed,
+    )
 
 
 def _make_chunk_rows(
@@ -274,13 +284,12 @@ def _first_update(rows: list[dict[str, Any]], predicate) -> int | None:
     return None
 
 
-def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _summary(
+    rows: list[dict[str, Any]],
+    bot_signature: str = BOT_SIGNATURE,
+) -> dict[str, Any]:
     if not rows:
-        return {
-            "models": 0,
-            "games": 0,
-            "bot_signature": BOT_SIGNATURE,
-        }
+        return {"models": 0, "games": 0, "bot_signature": bot_signature}
 
     _rolling(rows, 25)
     n = len(rows)
@@ -308,12 +317,9 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         stable_no_bot_win_from = None
 
     full_windows = [r for r in rows if int(r.get("rolling_window", 0)) >= 25]
-    first_roll50 = _first_update(full_windows, lambda r: r["rolling_model_score_pct"] >= 50.0)
-    first_roll75 = _first_update(full_windows, lambda r: r["rolling_model_score_pct"] >= 75.0)
-
     latest = rows[-1]
     return {
-        "bot_signature": BOT_SIGNATURE,
+        "bot_signature": bot_signature,
         "models": n,
         "games": games,
         "model_wins": model_wins,
@@ -345,8 +351,12 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "first_checkpoint_without_bot_win": _first_update(rows, lambda r: int(r["bot_wins"]) == 0),
         "last_bot_win_update": None if last_bot_win_idx < 0 else int(rows[last_bot_win_idx]["update"]),
         "stable_no_bot_win_from_update": stable_no_bot_win_from,
-        "first_rolling25_model_score_ge_50_update": first_roll50,
-        "first_rolling25_model_score_ge_75_update": first_roll75,
+        "first_rolling25_model_score_ge_50_update": _first_update(
+            full_windows, lambda r: r["rolling_model_score_pct"] >= 50.0
+        ),
+        "first_rolling25_model_score_ge_75_update": _first_update(
+            full_windows, lambda r: r["rolling_model_score_pct"] >= 75.0
+        ),
         "latest_update": int(latest["update"]),
         "latest_model_black_result": latest["model_black_result"],
         "latest_model_white_result": latest["model_white_result"],
@@ -356,78 +366,78 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _fmt_pct(value: float | int | None) -> str:
-    if value is None:
-        return "—"
-    return f"{float(value):.1f}%"
+    return "—" if value is None else f"{float(value):.1f}%"
 
 
 def _fmt_update(value: int | None) -> str:
     return "—" if value is None else str(int(value))
 
 
-def _svg_chart(rows: list[dict[str, Any]]) -> str:
+def _xy_points(rows: list[dict[str, Any]], value_key: str, *, width=1180, height=330) -> str:
     if not rows:
-        return "<p>Brak danych do wykresu.</p>"
-    width, height = 1180, 330
+        return ""
     left, right, top, bottom = 62, 24, 22, 44
     plot_w = width - left - right
     plot_h = height - top - bottom
     u0 = min(r["update"] for r in rows)
     u1 = max(r["update"] for r in rows)
     span = max(1, u1 - u0)
+    points = []
+    for row in rows:
+        pct = max(0.0, min(100.0, float(row[value_key])))
+        x = left + (int(row["update"]) - u0) / span * plot_w
+        y = top + (100.0 - pct) / 100.0 * plot_h
+        points.append(f"{x:.2f},{y:.2f}")
+    return " ".join(points)
 
-    def xy(update: int, pct: float) -> tuple[float, float]:
-        x = left + (update - u0) / span * plot_w
-        y = top + (100.0 - max(0.0, min(100.0, pct))) / 100.0 * plot_h
-        return x, y
 
-    raw_points = " ".join(
-        f"{xy(int(r['update']), float(r['model_score_pct']))[0]:.2f},{xy(int(r['update']), float(r['model_score_pct']))[1]:.2f}"
-        for r in rows
-    )
-    roll_points = " ".join(
-        f"{xy(int(r['update']), float(r['rolling_model_score_pct']))[0]:.2f},{xy(int(r['update']), float(r['rolling_model_score_pct']))[1]:.2f}"
-        for r in rows
-    )
+def _svg_chart(rows_by_key: dict[str, list[dict[str, Any]]]) -> str:
+    rows = next((r for r in rows_by_key.values() if r), [])
+    if not rows:
+        return "<p>Brak danych do wykresu.</p>"
+    width, height = 1180, 330
+    left, right, top, bottom = 62, 24, 22, 44
+    plot_h = height - top - bottom
+    u0 = min(r["update"] for r in rows)
+    u1 = max(r["update"] for r in rows)
+
     grid = []
     for pct in (0, 25, 50, 75, 100):
-        _, y = xy(u0, pct)
+        y = top + (100.0 - pct) / 100.0 * plot_h
         grid.append(
-            f"<line x1='{left}' y1='{y:.2f}' x2='{width-right}' y2='{y:.2f}' class='grid'/><text x='{left-10}' y='{y+4:.2f}' text-anchor='end'>{pct}%</text>"
+            f"<line x1='{left}' y1='{y:.2f}' x2='{width-right}' y2='{y:.2f}' class='grid'/>"
+            f"<text x='{left-10}' y='{y+4:.2f}' text-anchor='end'>{pct}%</text>"
+        )
+    lines = []
+    if rows_by_key.get("v1"):
+        lines.append(
+            f"<polyline points='{_xy_points(rows_by_key['v1'], 'rolling_model_score_pct')}' class='v1-line'/>"
+        )
+    if rows_by_key.get("v2"):
+        lines.append(
+            f"<polyline points='{_xy_points(rows_by_key['v2'], 'rolling_model_score_pct')}' class='v2-line'/>"
         )
     return (
-        f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='Wynik modeli przeciw botowi po update'>"
+        f"<svg viewBox='0 0 {width} {height}'>"
         + "".join(grid)
-        + f"<polyline points='{raw_points}' class='raw-line'/><polyline points='{roll_points}' class='roll-line'/>"
-        + f"<text x='{left}' y='{height-10}'>update {u0}</text><text x='{width-right}' y='{height-10}' text-anchor='end'>update {u1}</text>"
-        + "</svg>"
+        + "".join(lines)
+        + f"<text x='{left}' y='{height-10}'>update {u0}</text>"
+        + f"<text x='{width-right}' y='{height-10}' text-anchor='end'>update {u1}</text></svg>"
     )
 
 
-def _write_reports(results_path: Path, output_dir: Path) -> dict[str, Any]:
+def _write_single_report(
+    results_path: Path,
+    output_dir: Path,
+    spec: BotSpec,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows = _to_numeric_rows(_read_results(results_path))
-    summary = _summary(rows)
-    (output_dir / "summary.json").write_text(
+    summary = _summary(rows, spec.signature)
+    (output_dir / f"summary_{spec.key}.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-
     if not rows:
-        return summary
-
-    cards = [
-        ("Bot wygrywa", _fmt_pct(summary["bot_win_pct"]), f"{summary['bot_wins']}/{summary['games']} gier"),
-        ("Bot jako czarny", _fmt_pct(summary["bot_as_black"]["win_pct"]), f"score {_fmt_pct(summary['bot_as_black']['score_pct'])}"),
-        ("Bot jako biały", _fmt_pct(summary["bot_as_white"]["win_pct"]), f"score {_fmt_pct(summary['bot_as_white']['score_pct'])}"),
-        ("Pierwsza wygrana modelu", _fmt_update(summary["first_model_win_update"]), "update"),
-        ("Pierwsze 2:0 modelu", _fmt_update(summary["first_model_sweep_update"]), "update"),
-        ("Bot nie wygrywa od", _fmt_update(summary["stable_no_bot_win_from_update"]), "update, jeśli utrzymuje się do końca"),
-        ("Najnowszy rolling-25", _fmt_pct(summary["latest_rolling25_model_score_pct"]), "score modelu"),
-        ("Najnowszy model", _fmt_pct(summary["latest_model_score_pct"]), f"update {summary['latest_update']}"),
-    ]
-    card_html = "".join(
-        f"<div class='card'><div class='label'>{html.escape(label)}</div><div class='value'>{html.escape(value)}</div><div class='sub'>{html.escape(sub)}</div></div>"
-        for label, value, sub in cards
-    )
+        return rows, summary
 
     table_rows = []
     for r in reversed(rows):
@@ -444,115 +454,180 @@ def _write_reports(results_path: Path, output_dir: Path) -> dict[str, Any]:
             f"<td>{r['model_white_moves']}</td>"
             "</tr>"
         )
-
     report = f"""<!doctype html>
-<meta charset='utf-8'>
-<title>Connect6 Bot Arena</title>
+<meta charset='utf-8'><title>Connect6 {html.escape(spec.label)} Arena</title>
 <style>
-:root{{--bg:#0f131a;--panel:#171d26;--panel2:#202836;--text:#edf2f7;--muted:#9aa7b5;--border:#313b49;--good:#51c878;--bad:#ff6b6b;--draw:#e5ba54;--accent:#6ea1ff}}
-*{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,Segoe UI,sans-serif}}
-main{{max-width:1280px;margin:0 auto;padding:28px}} h1{{margin:0 0 4px;font-size:28px}} .muted{{color:var(--muted)}}
-.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:22px 0}}
-.card{{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}} .label,.sub{{color:var(--muted)}} .value{{font-size:25px;font-weight:750;margin:3px 0}}
-.chart{{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px;margin:14px 0 20px;overflow-x:auto}} svg{{width:100%;min-width:760px;height:auto}} svg text{{fill:var(--muted);font-size:12px}} .grid{{stroke:#34404f;stroke-width:1}} .raw-line{{fill:none;stroke:#657388;stroke-width:1;opacity:.55}} .roll-line{{fill:none;stroke:var(--accent);stroke-width:3}}
-.legend{{display:flex;gap:18px;color:var(--muted);margin:8px 0}} .legend b{{color:var(--text)}}
-table{{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--border)}} th,td{{padding:7px 9px;border-bottom:1px solid var(--border);text-align:right}} th{{position:sticky;top:0;background:var(--panel2);color:var(--muted)}} th:nth-child(2),td:nth-child(2){{text-align:left}} .win{{color:var(--good);font-weight:700}} .loss{{color:var(--bad);font-weight:700}} .draw{{color:var(--draw);font-weight:700}}
-.table-wrap{{max-height:720px;overflow:auto;border-radius:10px}}
-</style>
-<main>
-<h1>Connect6 — autosave vs GPU Tactical Bot</h1>
-<div class='muted'>{len(rows)} modeli • {2*len(rows)} gier • dokładnie 2 gry/model: model raz czarny, raz biały • bot {html.escape(BOT_SIGNATURE)}</div>
+body{{background:#0f131a;color:#edf2f7;font:14px system-ui;margin:0}}main{{max-width:1280px;margin:auto;padding:28px}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:20px 0}}
+.card{{background:#171d26;border:1px solid #313b49;border-radius:10px;padding:14px}}.value{{font-size:25px;font-weight:750}}
+.muted{{color:#9aa7b5}}table{{width:100%;border-collapse:collapse;background:#171d26}}th,td{{padding:7px 9px;border-bottom:1px solid #313b49;text-align:right}}
+th{{position:sticky;top:0;background:#202836}}th:nth-child(2),td:nth-child(2){{text-align:left}}.win{{color:#51c878;font-weight:700}}.loss{{color:#ff6b6b;font-weight:700}}.draw{{color:#e5ba54;font-weight:700}}.wrap{{max-height:760px;overflow:auto}}
+</style><main>
+<h1>{html.escape(spec.label)} — autosave arena</h1>
+<div class='muted'>{len(rows)} modeli • {2*len(rows)} gier • model raz czarny, raz biały</div>
+<div class='cards'>
+<div class='card'><div>Bot win</div><div class='value'>{summary['bot_win_pct']:.1f}%</div></div>
+<div class='card'><div>Bot score</div><div class='value'>{summary['bot_score_pct']:.1f}%</div></div>
+<div class='card'><div>Bot czarny win</div><div class='value'>{summary['bot_as_black']['win_pct']:.1f}%</div></div>
+<div class='card'><div>Bot biały win</div><div class='value'>{summary['bot_as_white']['win_pct']:.1f}%</div></div>
+<div class='card'><div>Pierwsza wygrana modelu</div><div class='value'>{_fmt_update(summary['first_model_win_update'])}</div></div>
+<div class='card'><div>Pierwsze 2:0 modelu</div><div class='value'>{_fmt_update(summary['first_model_sweep_update'])}</div></div>
+<div class='card'><div>Latest rolling-25 model</div><div class='value'>{_fmt_pct(summary['latest_rolling25_model_score_pct'])}</div></div>
+</div>
+<div class='wrap'><table><thead><tr><th>update</th><th>model</th><th>model czarny</th><th>model biały</th><th>score modelu</th><th>rolling-25</th><th>wygrane bota</th><th>ruchy B</th><th>ruchy W</th></tr></thead>
+<tbody>{''.join(table_rows)}</tbody></table></div></main>"""
+    (output_dir / f"bot_arena_{spec.key}.html").write_text(report, encoding="utf-8")
+    return rows, summary
+
+
+def _write_combined_report(
+    output_dir: Path,
+    data: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]],
+) -> None:
+    summaries = {key: summary for key, (_, summary) in data.items()}
+    rows_by_key = {key: rows for key, (rows, _) in data.items()}
+    comparison: dict[str, Any] = {}
+    if summaries.get("v1", {}).get("games") and summaries.get("v2", {}).get("games"):
+        comparison = {
+            "v2_minus_v1_bot_win_pct": summaries["v2"]["bot_win_pct"] - summaries["v1"]["bot_win_pct"],
+            "v2_minus_v1_bot_score_pct": summaries["v2"]["bot_score_pct"] - summaries["v1"]["bot_score_pct"],
+            "v2_minus_v1_latest_rolling25_bot_score_pct": (
+                100.0 - summaries["v2"]["latest_rolling25_model_score_pct"]
+            ) - (
+                100.0 - summaries["v1"]["latest_rolling25_model_score_pct"]
+            ),
+        }
+    (output_dir / "summary.json").write_text(
+        json.dumps({"bots": summaries, "comparison": comparison}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    cards = []
+    for spec in BOT_SPECS:
+        summary = summaries.get(spec.key, {})
+        if not summary.get("games"):
+            continue
+        cards.extend(
+            [
+                (f"{spec.label} win", _fmt_pct(summary["bot_win_pct"])),
+                (f"{spec.label} score", _fmt_pct(summary["bot_score_pct"])),
+                (f"{spec.label} latest rolling-25", _fmt_pct(100.0 - summary["latest_rolling25_model_score_pct"])),
+            ]
+        )
+    if comparison:
+        cards.append(("V2 - V1 win", f"{comparison['v2_minus_v1_bot_win_pct']:+.1f} pp"))
+
+    by_update = {}
+    for key, rows in rows_by_key.items():
+        for row in rows:
+            by_update.setdefault(int(row["update"]), {})[key] = row
+    table_rows = []
+    for update in sorted(by_update, reverse=True):
+        pair = by_update[update]
+        v1 = pair.get("v1")
+        v2 = pair.get("v2")
+        table_rows.append(
+            "<tr>"
+            f"<td>{update}</td>"
+            f"<td>{_fmt_pct(v1['model_score_pct'] if v1 else None)}</td>"
+            f"<td>{_fmt_pct(v1['rolling_model_score_pct'] if v1 else None)}</td>"
+            f"<td>{_fmt_pct(v2['model_score_pct'] if v2 else None)}</td>"
+            f"<td>{_fmt_pct(v2['rolling_model_score_pct'] if v2 else None)}</td>"
+            "</tr>"
+        )
+
+    card_html = "".join(
+        f"<div class='card'><div class='muted'>{html.escape(label)}</div><div class='value'>{html.escape(value)}</div></div>"
+        for label, value in cards
+    )
+    report = f"""<!doctype html>
+<meta charset='utf-8'><title>Connect6 Bot Arena V1 vs V2</title>
+<style>
+:root{{--bg:#0f131a;--panel:#171d26;--panel2:#202836;--text:#edf2f7;--muted:#9aa7b5;--border:#313b49;--v1:#8795aa;--v2:#6ea1ff}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:14px system-ui}}main{{max-width:1280px;margin:auto;padding:28px}}
+.muted{{color:var(--muted)}}.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:20px 0}}
+.card,.chart{{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px}}.value{{font-size:25px;font-weight:750;margin-top:3px}}
+.chart{{margin:14px 0 20px;overflow-x:auto}}svg{{width:100%;min-width:760px}}svg text{{fill:var(--muted);font-size:12px}}.grid{{stroke:#34404f}}.v1-line{{fill:none;stroke:var(--v1);stroke-width:3}}.v2-line{{fill:none;stroke:var(--v2);stroke-width:3}}
+.legend{{display:flex;gap:20px;margin-bottom:8px}}table{{width:100%;border-collapse:collapse;background:var(--panel)}}th,td{{padding:7px 9px;border-bottom:1px solid var(--border);text-align:right}}th{{position:sticky;top:0;background:var(--panel2)}}.wrap{{max-height:720px;overflow:auto}}
+</style><main>
+<h1>Connect6 — Bot Arena: V1 vs V2</h1>
+<div class='muted'>Każdy checkpoint gra po 2 gry z każdym botem: model raz czarny i raz biały. Łącznie 4 gry/model, jeśli oba zestawy są kompletne.</div>
 <div class='cards'>{card_html}</div>
-<div class='chart'><div class='legend'><span><b>Szary:</b> wynik konkretnego checkpointu (2 gry)</span><span><b>Niebieski:</b> rolling score z 25 checkpointów</span></div>{_svg_chart(rows)}</div>
-<div class='table-wrap'><table><thead><tr><th>update</th><th>model</th><th>model czarny</th><th>model biały</th><th>score modelu</th><th>rolling-25</th><th>wygrane bota</th><th>ruchy (M czarny)</th><th>ruchy (M biały)</th></tr></thead><tbody>{''.join(table_rows)}</tbody></table></div>
+<div class='chart'><div class='legend'><span>V1 rolling-25 model score</span><span>V2 rolling-25 model score</span></div>{_svg_chart(rows_by_key)}</div>
+<div class='wrap'><table><thead><tr><th>update</th><th>V1 model score</th><th>V1 rolling</th><th>V2 model score</th><th>V2 rolling</th></tr></thead><tbody>{''.join(table_rows)}</tbody></table></div>
 </main>"""
     (output_dir / "bot_arena.html").write_text(report, encoding="utf-8")
-    return summary
 
 
-def _print_summary(summary: dict[str, Any]) -> None:
+def _print_summary(spec: BotSpec, summary: dict[str, Any]) -> None:
     if not summary.get("models"):
-        print("Brak wyników.")
+        print(f"{spec.label}: brak wyników.")
         return
     print("\n" + "=" * 78)
-    print("BOT ARENA — PODSUMOWANIE")
+    print(f"{spec.label} — PODSUMOWANIE")
     print("=" * 78)
     print(
         f"Modele: {summary['models']:,} | gry: {summary['games']:,} | "
         f"bot W/D/L: {summary['bot_wins']}/{summary['draws']}/{summary['model_wins']} | "
-        f"bot win={summary['bot_win_pct']:.2f}% | bot score={summary['bot_score_pct']:.2f}%"
+        f"win={summary['bot_win_pct']:.2f}% | score={summary['bot_score_pct']:.2f}%"
     )
     print(
-        f"Bot czarny: win={summary['bot_as_black']['win_pct']:.2f}% score={summary['bot_as_black']['score_pct']:.2f}% | "
-        f"bot biały: win={summary['bot_as_white']['win_pct']:.2f}% score={summary['bot_as_white']['score_pct']:.2f}%"
-    )
-    print(
-        "Pierwsza wygrana modelu: update " + _fmt_update(summary.get("first_model_win_update"))
-        + " | pierwsze 2:0: update " + _fmt_update(summary.get("first_model_sweep_update"))
-    )
-    print(
-        "Ostatnia wygrana bota: update " + _fmt_update(summary.get("last_bot_win_update"))
-        + " | bot nie wygrywa już od: update " + _fmt_update(summary.get("stable_no_bot_win_from_update"))
-    )
-    print(
-        f"Najnowszy update {summary['latest_update']}: {summary['latest_model_score_pct']:.1f}% score modelu | "
-        f"rolling-25={summary['latest_rolling25_model_score_pct']:.1f}%"
+        f"Bot czarny win={summary['bot_as_black']['win_pct']:.2f}% | "
+        f"bot biały win={summary['bot_as_white']['win_pct']:.2f}% | "
+        f"latest rolling-25 bot score={100.0-summary['latest_rolling25_model_score_pct']:.2f}%"
     )
 
 
-def run(config_path: str | Path, *, reset: bool = False, models_per_batch_override: int | None = None) -> None:
-    config_path = Path(config_path).resolve()
-    cfg = legacy._read_yaml(config_path)
-    arena = cfg.get("bot_arena", cfg)
-    root = _project_root(config_path)
+def _migrate_legacy_v1(output_dir: Path) -> None:
+    legacy_path = output_dir / "bot_matches.csv"
+    v1_path = output_dir / "bot_matches_v1.csv"
+    if legacy_path.exists() and not v1_path.exists():
+        shutil.copy2(legacy_path, v1_path)
+        print(f"[MIGRATE] Zachowano stare wyniki V1: {legacy_path.name} -> {v1_path.name}")
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("Bot arena wymaga CUDA")
-    device = torch.device(arena.get("device", "cuda"))
-    if device.type != "cuda":
-        raise RuntimeError("Bot arena jest trybem GPU i wymaga device=cuda")
 
-    checkpoint_dir = legacy._resolve_path(root, arena["checkpoint_dir"])
-    output_dir = legacy._resolve_path(root, arena["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results_path = output_dir / "bot_matches.csv"
-    state_path = output_dir / "state.json"
-
-    if reset:
-        for path in (results_path, state_path, output_dir / "summary.json", output_dir / "bot_arena.html"):
-            path.unlink(missing_ok=True)
-
-    _validate_state(state_path, checkpoint_dir=checkpoint_dir)
-    refs = legacy.discover_checkpoints(checkpoint_dir)
-    if not refs:
-        raise RuntimeError(f"Nie znaleziono model_update_*.pt w {checkpoint_dir}")
+def _run_one_bot(
+    spec: BotSpec,
+    refs,
+    *,
+    checkpoint_dir: Path,
+    output_dir: Path,
+    device: torch.device,
+    dtype: torch.dtype,
+    batch_size: int,
+    sync_interval: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    results_path = output_dir / f"bot_matches_{spec.key}.csv"
+    state_path = output_dir / f"state_{spec.key}.json"
+    _validate_state(state_path, checkpoint_dir=checkpoint_dir, bot_signature=spec.signature)
 
     completed = _completed_names(results_path)
     pending = [ref for ref in refs if ref.name not in completed]
-    dtype = _dtype_from_name(arena.get("inference_dtype", "bfloat16"))
-    batch_size = int(models_per_batch_override or arena.get("models_per_batch", 256))
-    batch_size = max(1, batch_size)
-    sync_interval = max(1, int(arena.get("sync_interval_moves", 16)))
-
     print("\n" + "=" * 78)
-    print("CONNECT6 BOT ARENA — ALL AUTOSAVES VS GPU TACTICAL BOT")
+    print(f"{spec.label.upper()} — ALL AUTOSAVES")
     print("=" * 78)
-    print(f"Checkpointy: {len(refs):,} | gotowe: {len(completed):,} | pozostało: {len(pending):,}")
-    print(f"Każdy model: 2 gry (raz czarny, raz biały) | batch modeli: {batch_size}")
-    print(f"GPU: {torch.cuda.get_device_name(device)} | CNN dtype: {dtype} | bot: {BOT_SIGNATURE}")
+    print(
+        f"Checkpointy: {len(refs):,} | gotowe: {len(completed):,} | "
+        f"pozostało: {len(pending):,} | 2 gry/model"
+    )
 
     if not pending:
-        summary = _write_reports(results_path, output_dir)
-        _print_summary(summary)
-        print(f"HTML: {output_dir / 'bot_arena.html'}")
-        return
+        data = _write_single_report(results_path, output_dir, spec)
+        _print_summary(spec, data[1])
+        return data
 
-    bot = GPUTacticalBot(device)
+    bot = spec.cls(device)
+    seed_board = torch.zeros((1, 19, 19), dtype=torch.int8, device=device)
+    seed_player = torch.ones(1, dtype=torch.int8, device=device)
+    seed_left = torch.ones(1, dtype=torch.int8, device=device)
+    bot.actions(seed_board, seed_player, seed_left)
+    torch.cuda.synchronize(device)
+
     family_cfg: dict[str, Any] | None = None
     total_started = time.perf_counter()
     completed_this_run = 0
 
-    for chunk_index, start in enumerate(range(0, len(pending), batch_size), 1):
+    for start in range(0, len(pending), batch_size):
         chunk_refs = pending[start : start + batch_size]
         load_started = time.perf_counter()
         checkpoints = [_load_lean_checkpoint(ref.path) for ref in chunk_refs]
@@ -567,12 +642,9 @@ def run(config_path: str | Path, *, reset: bool = False, models_per_batch_overri
         except torch.cuda.OutOfMemoryError as exc:
             torch.cuda.empty_cache()
             raise RuntimeError(
-                f"OOM przy batchu {len(chunk_refs)} modeli. Zmniejsz bot_arena.models_per_batch "
-                "np. do połowy albo użyj --models-per-batch."
+                f"OOM przy batchu {len(chunk_refs)} modeli. Zmniejsz bot_arena.models_per_batch."
             ) from exc
 
-        # Warm-up one model-side forward before timing real games so cuDNN can
-        # select/cache convolution algorithms outside the match timing.
         warm_env = VectorConnect6(len(chunk_refs), 19, 6, device=device, debug_checks=False)
         warm_x = warm_env.network_input()
         ensemble.forward_grouped(warm_x.unsqueeze(1)).squeeze(1)
@@ -580,16 +652,10 @@ def run(config_path: str | Path, *, reset: bool = False, models_per_batch_overri
         torch.cuda.synchronize(device)
 
         black_winners, black_moves, black_elapsed = _play_colour_game(
-            ensemble,
-            bot,
-            model_is_black=True,
-            sync_interval_moves=sync_interval,
+            ensemble, bot, model_is_black=True, sync_interval_moves=sync_interval
         )
         white_winners, white_moves, white_elapsed = _play_colour_game(
-            ensemble,
-            bot,
-            model_is_black=False,
-            sync_interval_moves=sync_interval,
+            ensemble, bot, model_is_black=False, sync_interval_moves=sync_interval
         )
         game_elapsed = black_elapsed + white_elapsed
         rows = _make_chunk_rows(
@@ -603,38 +669,117 @@ def run(config_path: str | Path, *, reset: bool = False, models_per_batch_overri
         _append_rows(results_path, rows)
         completed_this_run += len(chunk_refs)
 
-        chunk_bot_wins = sum(int(r["bot_wins"]) for r in rows)
-        chunk_model_wins = sum(int(r["model_wins"]) for r in rows)
-        chunk_draws = sum(int(r["draws"]) for r in rows)
         games = 2 * len(chunk_refs)
         gps = games / max(game_elapsed, 1e-9)
         progress = 100.0 * completed_this_run / len(pending)
-        wall = time.perf_counter() - total_started
         print(
-            f"[{progress:6.2f}%] modele {completed_this_run:,}/{len(pending):,} | "
-            f"gry={games:,} | {gps:,.1f} g/s | bot/model/draw={chunk_bot_wins}/{chunk_model_wins}/{chunk_draws} | "
-            f"load={load_elapsed:.2f}s | play={game_elapsed:.2f}s | wall={wall:.2f}s"
+            f"[{progress:6.2f}%] {completed_this_run:,}/{len(pending):,} modeli | "
+            f"{gps:,.1f} g/s | bot/model/draw="
+            f"{sum(int(r['bot_wins']) for r in rows)}/"
+            f"{sum(int(r['model_wins']) for r in rows)}/"
+            f"{sum(int(r['draws']) for r in rows)} | "
+            f"load={load_elapsed:.2f}s | play={game_elapsed:.2f}s"
         )
 
-        del ensemble, checkpoints, black_winners, white_winners, black_moves, white_moves, rows
+        del ensemble, checkpoints, rows
         gc.collect()
         torch.cuda.empty_cache()
+        _write_single_report(results_path, output_dir, spec)
 
-        # Rebuild HTML/summary after every chunk. If the process is interrupted,
-        # all completed model pairs remain immediately inspectable and resumable.
-        _write_reports(results_path, output_dir)
+    data = _write_single_report(results_path, output_dir, spec)
+    _print_summary(spec, data[1])
+    print(f"[DONE] {spec.label}: {completed_this_run:,} nowych modeli | wall={time.perf_counter()-total_started:.2f}s")
+    return data
 
-    summary = _write_reports(results_path, output_dir)
-    _print_summary(summary)
-    total_elapsed = time.perf_counter() - total_started
-    print(f"[DONE] {completed_this_run:,} nowych modeli | wall={total_elapsed:.2f}s")
-    print(f"CSV:  {results_path}")
-    print(f"HTML: {output_dir / 'bot_arena.html'}")
+
+def run(
+    config_path: str | Path,
+    *,
+    reset: bool = False,
+    models_per_batch_override: int | None = None,
+) -> None:
+    config_path = Path(config_path).resolve()
+    cfg = legacy._read_yaml(config_path)
+    arena = cfg.get("bot_arena", cfg)
+    root = _project_root(config_path)
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Bot arena wymaga CUDA")
+    device = torch.device(arena.get("device", "cuda"))
+    if device.type != "cuda":
+        raise RuntimeError("Bot arena jest trybem GPU i wymaga device=cuda")
+
+    checkpoint_dir = legacy._resolve_path(root, arena["checkpoint_dir"])
+    output_dir = legacy._resolve_path(root, arena["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if reset:
+        for name in (
+            "bot_matches.csv", "state.json", "summary.json", "bot_arena.html",
+            "bot_matches_v1.csv", "bot_matches_v2.csv",
+            "state_v1.json", "state_v2.json",
+            "summary_v1.json", "summary_v2.json",
+            "bot_arena_v1.html", "bot_arena_v2.html",
+        ):
+            (output_dir / name).unlink(missing_ok=True)
+    else:
+        _migrate_legacy_v1(output_dir)
+
+    refs = legacy.discover_checkpoints(checkpoint_dir)
+    if not refs:
+        raise RuntimeError(f"Nie znaleziono model_update_*.pt w {checkpoint_dir}")
+
+    requested = [str(v).lower() for v in arena.get("bots", ["v1", "v2"])]
+    specs = [spec for spec in BOT_SPECS if spec.key in requested]
+    unknown = sorted(set(requested) - {spec.key for spec in BOT_SPECS})
+    if unknown:
+        raise ValueError(f"Nieznane boty w bot_arena.bots: {unknown}; dostępne: v1, v2")
+    if not specs:
+        raise ValueError("bot_arena.bots nie może być puste")
+
+    dtype = _dtype_from_name(arena.get("inference_dtype", "bfloat16"))
+    batch_size = max(1, int(models_per_batch_override or arena.get("models_per_batch", 256)))
+    sync_interval = max(1, int(arena.get("sync_interval_moves", 16)))
+
+    print("\n" + "=" * 78)
+    print("CONNECT6 BOT ARENA — V1 + V2")
+    print("=" * 78)
+    print(f"Checkpointy: {len(refs):,} | boty: {', '.join(spec.label for spec in specs)}")
+    print(f"Każdy bot: 2 gry/model (model raz czarny, raz biały) | batch={batch_size}")
+    print(f"GPU: {torch.cuda.get_device_name(device)} | CNN dtype: {dtype}")
+
+    data: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]] = {}
+    for spec in specs:
+        data[spec.key] = _run_one_bot(
+            spec,
+            refs,
+            checkpoint_dir=checkpoint_dir,
+            output_dir=output_dir,
+            device=device,
+            dtype=dtype,
+            batch_size=batch_size,
+            sync_interval=sync_interval,
+        )
+        _write_combined_report(output_dir, data)
+
+    for spec in BOT_SPECS:
+        if spec.key not in data:
+            path = output_dir / f"bot_matches_{spec.key}.csv"
+            if path.exists():
+                data[spec.key] = _write_single_report(path, output_dir, spec)
+    _write_combined_report(output_dir, data)
+
+    print("\n[DONE] Bot arena")
+    for spec in BOT_SPECS:
+        path = output_dir / f"bot_matches_{spec.key}.csv"
+        if path.exists():
+            print(f"CSV {spec.key.upper()}: {path}")
+    print(f"HTML comparison: {output_dir / 'bot_arena.html'}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Connect6: każdy autosave CNN gra 2 gry przeciw GPU Tactical Bot"
+        description="Connect6: każdy autosave CNN gra po 2 gry z GPU Tactical Bot V1 i V2"
     )
     parser.add_argument("--config", default="configs/bot_arena.yaml")
     parser.add_argument("--reset", action="store_true", help="Usuń poprzednie wyniki i policz od zera")
