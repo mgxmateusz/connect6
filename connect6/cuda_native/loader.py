@@ -319,15 +319,16 @@ def _bootstrap_msvc_environment() -> None:
     if not cuda_cl.is_file():
         raise RuntimeError(f"Zniknął wybrany host compiler CUDA: {cuda_cl}")
 
-    print(f"[NATIVE BUILD] C++/link MSVC: {runtime_root.name}")
-    print(f"[NATIVE BUILD] C++ cl.exe: {runtime_cl}")
-    print(f"[NATIVE BUILD] link.exe: {runtime_link}")
+    print(f"[NATIVE BUILD] C++/link MSVC: {runtime_root.name}", flush=True)
+    print(f"[NATIVE BUILD] C++ cl.exe: {runtime_cl}", flush=True)
+    print(f"[NATIVE BUILD] link.exe: {runtime_link}", flush=True)
     print(
         f"[NATIVE BUILD] CUDA host MSVC: {selector} ({cuda_host_version}) "
-        f"| {cuda_cl}"
+        f"| {cuda_cl}",
+        flush=True,
     )
-    print(f"[NATIVE BUILD] CUDA host include: {cuda_host_include}")
-    print(f"[NATIVE BUILD] MSVC runtime lib x64: {runtime_lib}")
+    print(f"[NATIVE BUILD] CUDA host include: {cuda_host_include}", flush=True)
+    print(f"[NATIVE BUILD] MSVC runtime lib x64: {runtime_lib}", flush=True)
 
 
 def _require_environment() -> None:
@@ -358,6 +359,11 @@ def load_native_championship_extension(*, verbose: bool = True):
         str(root / "native_championship.cpp"),
         str(root / "native_championship_kernel.cu"),
     ]
+
+    extension_name = "connect6_cuda_championship_sm120_v13"
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
+    build_directory = local_app_data / "connect6_native_build" / extension_name
+    build_directory.mkdir(parents=True, exist_ok=True)
 
     old_arch = os.environ.get("TORCH_CUDA_ARCH_LIST")
     os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0"
@@ -393,15 +399,22 @@ def load_native_championship_extension(*, verbose: bool = True):
             )
             ldflags.append(f"/LIBPATH:{runtime_lib}")
 
+        print(f"[NATIVE BUILD] extension: {extension_name}", flush=True)
+        print(f"[NATIVE BUILD] build dir: {build_directory}", flush=True)
+        print("[NATIVE BUILD] ENTER torch.utils.cpp_extension.load()", flush=True)
+
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v12",
+            name=extension_name,
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
             extra_ldflags=ldflags,
             with_cuda=True,
             verbose=verbose,
+            build_directory=str(build_directory),
         )
+
+        print("[NATIVE BUILD] EXIT torch.utils.cpp_extension.load()", flush=True)
     finally:
         if old_arch is None:
             os.environ.pop("TORCH_CUDA_ARCH_LIST", None)
