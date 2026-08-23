@@ -1,0 +1,28 @@
+1. Dodać normalizacje po każdej warstwie GroupNorm - 8 kanałów na grupę niezależnie od wielkości warstwy
+
+
+2. Warstwy wejściowe:
+1 - moje / 0 - reszta
+1 - przeciwnika / 0 - reszta
+1 - plansza / 0 - padding
+1 - ostatni ruch / 0 - nieostatni ruch
+
+
+3. Walki przeciwko historycznym:
+50% - losujemy ze wszystkich checkpointów
+25% - losujemy z ostatnich 50% checkpointów
+25% - losujemy z ostatnich 25% checkpointów
+(nie wykrywamy powtórzeń bo 3/128 to niedużo a niepotrzebna dodatkowa operacja zwalniająca)
+
+
+4. wielkość bufora nie ustalać liczba * ilosć minibatch a jako num_envs * completed_positions_per_update
+(w tedy w przybliżeniu oznacza ta liczba ile może trwać maksymalnie partia by trafiła jako całość do bufora.)
+
+
+5. Zmienić silnik gry by zbieranie doświadczeń odbywało się na gpu, podobnie jak w championsach, ale ogólna poprawa wydajności procesu uczenia.
+
+
+6. Dodać kilka stołów by grało przeciwko prostemu botowi, bot ma działać normalnie na GPU, nie być uczącym się modelem. Prosty matematyczny i regularny bot, dla kazdeog legalnego pola liczy coś a pozniej argmax(score[361])
+
+
+7. 
