@@ -15,7 +15,7 @@ _BOT_EXTENSION = None
 
 
 def load_native_bot_extension(*, verbose: bool = False):
-    """Build/load the native CUDA extension used by the tactical bot."""
+    """Build/load the native CUDA extension used by both tactical bot versions."""
     global _BOT_EXTENSION
     if _BOT_EXTENSION is not None:
         return _BOT_EXTENSION
@@ -42,10 +42,10 @@ def load_native_bot_extension(*, verbose: bool = False):
         str(root / "native_bot_kernel.cu"),
     ]
 
-    # v3: the CUDA translation unit intentionally contains no Torch headers.
-    # This avoids an NVCC/MSVC ambiguity in PyTorch's compiled_autograd headers
-    # on CUDA 12.9 + VS2026/v143 while keeping the Python/Torch binding in .cpp.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v3"
+    # v4 adds GPU Tactical Bot V2 while preserving V1 in the same extension.
+    # The CUDA translation unit still intentionally contains no Torch headers;
+    # this avoids the NVCC/MSVC ambiguity seen on CUDA 12.9 + Windows.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v4"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -63,7 +63,7 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use compiles the CUDA kernel with NVCC; later runs use the cache.",
+        "[BOT BUILD] First use compiles V1+V2 CUDA kernels with NVCC; later runs use the cache.",
         flush=True,
     )
 
