@@ -47,15 +47,31 @@ def load_native_bot_extension(*, verbose: bool = False):
         str(root / "native_bot_kernel.cu"),
     ]
 
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v1"
+    # v2 intentionally uses a fresh build directory. A killed first-time
+    # torch extension build can leave PyTorch's empty `lock` file behind and
+    # every later process then waits forever without printing an error.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v2"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
 
+    lock_file = build_directory / "lock"
+    if lock_file.exists():
+        # This application never intentionally compiles the same bot extension
+        # concurrently. Treat a pre-existing lock at process startup as stale
+        # (typically left by Ctrl+C / closing the GUI during NVCC compilation).
+        try:
+            lock_file.unlink()
+            print(f"[BOT BUILD] Removed stale build lock: {lock_file}", flush=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot remove stale CUDA build lock: {lock_file}\n{exc}"
+            ) from exc
+
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use may take a while because NVCC must compile the CUDA kernel.",
+        "[BOT BUILD] First use compiles the CUDA kernel with NVCC; later runs use the cache.",
         flush=True,
     )
 
