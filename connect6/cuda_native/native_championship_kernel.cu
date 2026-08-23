@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -39,9 +40,9 @@ __device__ __forceinline__ const unsigned long long* board_ptr_const(
 
 __device__ __forceinline__ bool bit_at(
     const int64_t* boards, int color, int slot, int pos, int slots) {
-    int word = pos >> 6;
-    int bit = pos & 63;
-    unsigned long long value = *board_ptr_const(boards, color, word, slots);
+    const int word = pos >> 6;
+    const int bit = pos & 63;
+    const unsigned long long value = board_ptr_const(boards, color, word, slots)[slot];
     return ((value >> bit) & 1ULL) != 0ULL;
 }
 
@@ -72,7 +73,8 @@ __device__ __forceinline__ half canonical_input_value(
     const bool black_to_move = current_player[slot] == 1;
     const int me_color = black_to_move ? 0 : 1;
     const int opp_color = black_to_move ? 1 : 0;
-    const bool value = bit_at(boards, channel == 0 ? me_color : opp_color, slot, pos, slots);
+    const bool value = bit_at(
+        boards, channel == 0 ? me_color : opp_color, slot, pos, slots);
     return __float2half(value ? 1.0f : 0.0f);
 }
 
@@ -80,7 +82,6 @@ __device__ __forceinline__ float silu_fast(float x) {
     return x / (1.0f + __expf(-x));
 }
 
-// First convolution: canonical checkpoint input is generated lazily from bitboards.
 template<int COUT, int KH, int KPAD, int OPAD>
 __global__ void conv_first_kernel(
     const int64_t* __restrict__ boards,
@@ -95,10 +96,11 @@ __global__ void conv_first_kernel(
     int slots) {
 
     constexpr int NT = (COUT + WN - 1) / WN;
+    constexpr int MT = (HW + WM - 1) / WM;
     int q = static_cast<int>(blockIdx.x);
-    int tile_n = q % NT; q /= NT;
-    int tile_m = q % ((HW + WM - 1) / WM); q /= ((HW + WM - 1) / WM);
-    int slot = q;
+    const int tile_n = q % NT; q /= NT;
+    const int tile_m = q % MT; q /= MT;
+    const int slot = q;
     if (slot >= slots || !active[slot]) return;
 
     const int lane = threadIdx.x & 31;
@@ -119,31 +121,32 @@ __global__ void conv_first_kernel(
 
     for (int k0 = 0; k0 < KPAD; k0 += WK) {
         for (int t = lane; t < WM * WK; t += WARP) {
-            int mr = t / WK;
-            int kk = t - mr * WK;
-            int pos = m0 + mr;
-            int k = k0 + kk;
+            const int mr = t / WK;
+            const int kk = t - mr * WK;
+            const int pos = m0 + mr;
+            const int k = k0 + kk;
             half v = __float2half(0.0f);
             if (pos < HW && k < KREAL) {
-                int channel = k / (KH * KH);
-                int rem = k - channel * KH * KH;
-                int kr = rem / KH;
-                int kc = rem - kr * KH;
-                int orow = pos / BOARD;
-                int ocol = pos - orow * BOARD;
-                int irow = orow + kr - PAD;
-                int icol = ocol + kc - PAD;
+                const int channel = k / (KH * KH);
+                const int rem = k - channel * KH * KH;
+                const int kr = rem / KH;
+                const int kc = rem - kr * KH;
+                const int orow = pos / BOARD;
+                const int ocol = pos - orow * BOARD;
+                const int irow = orow + kr - PAD;
+                const int icol = ocol + kc - PAD;
                 if ((unsigned)irow < BOARD && (unsigned)icol < BOARD) {
-                    int ipos = irow * BOARD + icol;
                     v = canonical_input_value(
-                        boards, slot, ipos, channel, slots, current_player, stones_left);
+                        boards, slot, irow * BOARD + icol, channel,
+                        slots, current_player, stones_left);
                 }
             }
             a_smem[t] = v;
         }
         __syncwarp();
         wmma::load_matrix_sync(a_frag, a_smem, WK);
-        const half* bptr = weights + (static_cast<int64_t>(model) * OPAD + n0) * KPAD + k0;
+        const half* bptr = weights
+            + (static_cast<int64_t>(model) * OPAD + n0) * KPAD + k0;
         wmma::load_matrix_sync(b_frag, bptr, KPAD);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         __syncwarp();
@@ -152,14 +155,15 @@ __global__ void conv_first_kernel(
     wmma::store_matrix_sync(c_smem, c_frag, WN, wmma::mem_row_major);
     __syncwarp();
     for (int t = lane; t < WM * WN; t += WARP) {
-        int mr = t / WN;
-        int nc = t - mr * WN;
-        int pos = m0 + mr;
-        int oc = n0 + nc;
+        const int mr = t / WN;
+        const int nc = t - mr * WN;
+        const int pos = m0 + mr;
+        const int oc = n0 + nc;
         if (pos < HW && oc < COUT) {
-            float y = c_smem[t] + __half2float(bias[static_cast<int64_t>(model) * OPAD + oc]);
-            y = silu_fast(y);
-            output[(static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + oc] = __float2half_rn(y);
+            float y = c_smem[t]
+                + __half2float(bias[static_cast<int64_t>(model) * OPAD + oc]);
+            output[(static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + oc]
+                = __float2half_rn(silu_fast(y));
         }
     }
 }
@@ -177,10 +181,11 @@ __global__ void conv_hidden_kernel(
     int slots) {
 
     constexpr int NT = (COUT + WN - 1) / WN;
+    constexpr int MT = (HW + WM - 1) / WM;
     int q = static_cast<int>(blockIdx.x);
-    int tile_n = q % NT; q /= NT;
-    int tile_m = q % ((HW + WM - 1) / WM); q /= ((HW + WM - 1) / WM);
-    int slot = q;
+    const int tile_n = q % NT; q /= NT;
+    const int tile_m = q % MT; q /= MT;
+    const int slot = q;
     if (slot >= slots || !active[slot]) return;
 
     const int lane = threadIdx.x & 31;
@@ -201,22 +206,22 @@ __global__ void conv_hidden_kernel(
 
     for (int k0 = 0; k0 < KPAD; k0 += WK) {
         for (int t = lane; t < WM * WK; t += WARP) {
-            int mr = t / WK;
-            int kk = t - mr * WK;
-            int pos = m0 + mr;
-            int k = k0 + kk;
+            const int mr = t / WK;
+            const int kk = t - mr * WK;
+            const int pos = m0 + mr;
+            const int k = k0 + kk;
             half v = __float2half(0.0f);
             if (pos < HW && k < KREAL) {
-                int channel = k / (KH * KH);
-                int rem = k - channel * KH * KH;
-                int kr = rem / KH;
-                int kc = rem - kr * KH;
-                int orow = pos / BOARD;
-                int ocol = pos - orow * BOARD;
-                int irow = orow + kr - PAD;
-                int icol = ocol + kc - PAD;
+                const int channel = k / (KH * KH);
+                const int rem = k - channel * KH * KH;
+                const int kr = rem / KH;
+                const int kc = rem - kr * KH;
+                const int orow = pos / BOARD;
+                const int ocol = pos - orow * BOARD;
+                const int irow = orow + kr - PAD;
+                const int icol = ocol + kc - PAD;
                 if ((unsigned)irow < BOARD && (unsigned)icol < BOARD) {
-                    int ipos = irow * BOARD + icol;
+                    const int ipos = irow * BOARD + icol;
                     v = input[(static_cast<int64_t>(slot) * HW + ipos) * STORAGE_C + channel];
                 }
             }
@@ -224,7 +229,8 @@ __global__ void conv_hidden_kernel(
         }
         __syncwarp();
         wmma::load_matrix_sync(a_frag, a_smem, WK);
-        const half* bptr = weights + (static_cast<int64_t>(model) * OPAD + n0) * KPAD + k0;
+        const half* bptr = weights
+            + (static_cast<int64_t>(model) * OPAD + n0) * KPAD + k0;
         wmma::load_matrix_sync(b_frag, bptr, KPAD);
         wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
         __syncwarp();
@@ -233,19 +239,21 @@ __global__ void conv_hidden_kernel(
     wmma::store_matrix_sync(c_smem, c_frag, WN, wmma::mem_row_major);
     __syncwarp();
     for (int t = lane; t < WM * WN; t += WARP) {
-        int mr = t / WN;
-        int nc = t - mr * WN;
-        int pos = m0 + mr;
-        int oc = n0 + nc;
+        const int mr = t / WN;
+        const int nc = t - mr * WN;
+        const int pos = m0 + mr;
+        const int oc = n0 + nc;
         if (pos < HW && oc < COUT) {
-            float y = c_smem[t] + __half2float(bias[static_cast<int64_t>(model) * OPAD + oc]);
-            y = silu_fast(y);
-            output[(static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + oc] = __float2half_rn(y);
+            float y = c_smem[t]
+                + __half2float(bias[static_cast<int64_t>(model) * OPAD + oc]);
+            output[(static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + oc]
+                = __float2half_rn(silu_fast(y));
         }
     }
 }
 
-__device__ __forceinline__ void choose_better(float candidate_v, int candidate_i, float& best_v, int& best_i) {
+__device__ __forceinline__ void choose_better(
+    float candidate_v, int candidate_i, float& best_v, int& best_i) {
     if (candidate_v > best_v || (candidate_v == best_v && candidate_i < best_i)) {
         best_v = candidate_v;
         best_i = candidate_i;
@@ -263,12 +271,12 @@ __global__ void policy_argmax_kernel(
     int16_t* __restrict__ actions,
     int slots) {
 
-    int slot = static_cast<int>(blockIdx.x);
+    const int slot = static_cast<int>(blockIdx.x);
     if (slot >= slots || !active[slot]) return;
-    int tid = threadIdx.x;
-    int lane = tid & 31;
-    int warp = tid >> 5;
-    int model = actor_model(slot, current_player, black_model, white_model);
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int model = actor_model(slot, current_player, black_model, white_model);
 
     const half* w = policy_weight + static_cast<int64_t>(model) * STORAGE_C;
     const half2* w2 = reinterpret_cast<const half2*>(w);
@@ -277,13 +285,14 @@ __global__ void policy_argmax_kernel(
 
     for (int pos = tid; pos < HW; pos += blockDim.x) {
         if (occupied_at(boards, slot, pos, slots)) continue;
-        const half* fp = features + (static_cast<int64_t>(slot) * HW + pos) * STORAGE_C;
+        const half* fp = features
+            + (static_cast<int64_t>(slot) * HW + pos) * STORAGE_C;
         const half2* f2 = reinterpret_cast<const half2*>(fp);
         float acc = 0.0f;
         #pragma unroll
         for (int k = 0; k < STORAGE_C / 2; ++k) {
-            float2 a = __half22float2(f2[k]);
-            float2 b = __half22float2(w2[k]);
+            const float2 a = __half22float2(f2[k]);
+            const float2 b = __half22float2(w2[k]);
             acc = fmaf(a.x, b.x, acc);
             acc = fmaf(a.y, b.y, acc);
         }
@@ -291,8 +300,8 @@ __global__ void policy_argmax_kernel(
     }
 
     for (int d = 16; d > 0; d >>= 1) {
-        float ov = __shfl_down_sync(0xffffffffu, best_v, d);
-        int oi = __shfl_down_sync(0xffffffffu, best_i, d);
+        const float ov = __shfl_down_sync(0xffffffffu, best_v, d);
+        const int oi = __shfl_down_sync(0xffffffffu, best_i, d);
         choose_better(ov, oi, best_v, best_i);
     }
 
@@ -308,8 +317,8 @@ __global__ void policy_argmax_kernel(
         float v = lane < (blockDim.x >> 5) ? warp_v[lane] : -FLT_MAX;
         int i = lane < (blockDim.x >> 5) ? warp_i[lane] : HW;
         for (int d = 16; d > 0; d >>= 1) {
-            float ov = __shfl_down_sync(0xffffffffu, v, d);
-            int oi = __shfl_down_sync(0xffffffffu, i, d);
+            const float ov = __shfl_down_sync(0xffffffffu, v, d);
+            const int oi = __shfl_down_sync(0xffffffffu, i, d);
             choose_better(ov, oi, v, i);
         }
         if (lane == 0) actions[slot] = static_cast<int16_t>(i < HW ? i : 0);
@@ -321,37 +330,27 @@ __device__ __forceinline__ int64_t pair_prefix(int i, int n) {
 }
 
 __device__ __forceinline__ void pair_from_index(int pair_idx, int n, int& a, int& b) {
-    double x = static_cast<double>(2 * n - 1);
-    double disc = x * x - 8.0 * static_cast<double>(pair_idx);
+    const double x = static_cast<double>(2 * n - 1);
+    const double disc = x * x - 8.0 * static_cast<double>(pair_idx);
     int i = static_cast<int>(floor((x - sqrt(disc)) * 0.5));
     if (i < 0) i = 0;
     if (i > n - 2) i = n - 2;
     while (i > 0 && pair_prefix(i, n) > pair_idx) --i;
     while (i + 1 < n - 1 && pair_prefix(i + 1, n) <= pair_idx) ++i;
-    int64_t base = pair_prefix(i, n);
+    const int64_t base = pair_prefix(i, n);
     a = i;
     b = i + 1 + static_cast<int>(pair_idx - base);
 }
 
-__device__ __forceinline__ void decode_game_models(int game_id, int n, int& black, int& white) {
-    int pair_idx = game_id >> 1;
+__device__ __forceinline__ void decode_game_models(
+    int game_id, int n, int& black, int& white) {
+    const int pair_idx = game_id >> 1;
     int a, b;
     pair_from_index(pair_idx, n, a, b);
     if ((game_id & 1) == 0) {
         black = a; white = b;
     } else {
         black = b; white = a;
-    }
-}
-
-__device__ __forceinline__ void clear_slot_boards(int64_t* boards, int slot, int slots) {
-    #pragma unroll
-    for (int c = 0; c < 2; ++c) {
-        #pragma unroll
-        for (int w = 0; w < WORDS; ++w) {
-            *board_ptr(boards, c, w, slots) = *board_ptr(boards, c, w, slots); // keep compiler address math hot
-            board_ptr(boards, c, w, slots)[slot] = 0ULL;
-        }
     }
 }
 
@@ -374,7 +373,7 @@ __device__ __forceinline__ void load_queue_item(
         active[slot] = 0;
         return;
     }
-    int game_id = game_ids[queue_idx];
+    const int game_id = game_ids[queue_idx];
     int black, white;
     decode_game_models(game_id, num_models, black, white);
     #pragma unroll
@@ -396,15 +395,14 @@ __device__ __forceinline__ void load_queue_item(
 __device__ __forceinline__ bool has_actor_stone(
     const int64_t* boards, int actor, int slot, int row, int col, int slots) {
     if ((unsigned)row >= BOARD || (unsigned)col >= BOARD) return false;
-    int pos = row * BOARD + col;
-    int color = actor == 1 ? 0 : 1;
-    return bit_at(boards, color, slot, pos, slots);
+    const int pos = row * BOARD + col;
+    return bit_at(boards, actor == 1 ? 0 : 1, slot, pos, slots);
 }
 
 __device__ __forceinline__ bool check_win_after_move(
     const int64_t* boards, int actor, int slot, int action, int slots) {
-    int row = action / BOARD;
-    int col = action - row * BOARD;
+    const int row = action / BOARD;
+    const int col = action - row * BOARD;
     const int dr[4] = {1, 0, 1, 1};
     const int dc[4] = {0, 1, 1, -1};
     #pragma unroll
@@ -412,12 +410,14 @@ __device__ __forceinline__ bool check_win_after_move(
         int count = 1;
         #pragma unroll
         for (int s = 1; s <= 5; ++s) {
-            if (!has_actor_stone(boards, actor, slot, row + dr[d] * s, col + dc[d] * s, slots)) break;
+            if (!has_actor_stone(
+                    boards, actor, slot, row + dr[d] * s, col + dc[d] * s, slots)) break;
             ++count;
         }
         #pragma unroll
         for (int s = 1; s <= 5; ++s) {
-            if (!has_actor_stone(boards, actor, slot, row - dr[d] * s, col - dc[d] * s, slots)) break;
+            if (!has_actor_stone(
+                    boards, actor, slot, row - dr[d] * s, col - dc[d] * s, slots)) break;
             ++count;
         }
         if (count >= 6) return true;
@@ -427,9 +427,9 @@ __device__ __forceinline__ bool check_win_after_move(
 
 __global__ void init_counters_kernel(int32_t* counters, int initial_active) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
-        counters[0] = initial_active; // next queue index
-        counters[1] = initial_active; // active slots
-        counters[2] = 0;              // completed games
+        counters[0] = initial_active;
+        counters[1] = initial_active;
+        counters[2] = 0;
     }
 }
 
@@ -446,7 +446,7 @@ __global__ void init_slots_kernel(
     int32_t* white_model,
     int32_t* current_queue,
     int slots) {
-    int slot = blockIdx.x * blockDim.x + threadIdx.x;
+    const int slot = blockIdx.x * blockDim.x + threadIdx.x;
     if (slot >= slots) return;
     if (slot < total) {
         load_queue_item(
@@ -474,26 +474,26 @@ __global__ void game_step_kernel(
     int32_t* __restrict__ counters,
     int slots) {
 
-    int slot = blockIdx.x * blockDim.x + threadIdx.x;
+    const int slot = blockIdx.x * blockDim.x + threadIdx.x;
     if (slot >= slots || !active[slot]) return;
 
-    int action = static_cast<int>(actions[slot]);
-    int actor = static_cast<int>(current_player[slot]);
-    int color = actor == 1 ? 0 : 1;
-    int word = action >> 6;
-    int bit = action & 63;
+    const int action = static_cast<int>(actions[slot]);
+    const int actor = static_cast<int>(current_player[slot]);
+    const int color = actor == 1 ? 0 : 1;
+    const int word = action >> 6;
+    const int bit = action & 63;
     board_ptr(boards, color, word, slots)[slot] |= (1ULL << bit);
 
-    int moves = static_cast<int>(move_count[slot]) + 1;
+    const int moves = static_cast<int>(move_count[slot]) + 1;
     move_count[slot] = static_cast<int16_t>(moves);
-    bool won = check_win_after_move(boards, actor, slot, action, slots);
-    bool draw = !won && moves >= HW;
+    const bool won = check_win_after_move(boards, actor, slot, action, slots);
+    const bool draw = !won && moves >= HW;
 
     if (won || draw) {
-        int qidx = current_queue[slot];
+        const int qidx = current_queue[slot];
         results[qidx] = won ? static_cast<int8_t>(actor) : static_cast<int8_t>(0);
         atomicAdd(counters + 2, 1);
-        int next = atomicAdd(counters + 0, 1);
+        const int next = atomicAdd(counters + 0, 1);
         if (next < total) {
             load_queue_item(
                 slot, next, game_ids, total, num_models, boards, active, current_player,
@@ -505,7 +505,7 @@ __global__ void game_step_kernel(
         return;
     }
 
-    int left = static_cast<int>(stones_left[slot]) - 1;
+    const int left = static_cast<int>(stones_left[slot]) - 1;
     if (left > 0) {
         stones_left[slot] = static_cast<int8_t>(left);
     } else {
@@ -514,7 +514,8 @@ __global__ void game_step_kernel(
     }
 }
 
-__global__ void set_condition_kernel(cudaGraphConditionalHandle handle, const int32_t* counters) {
+__global__ void set_condition_kernel(
+    cudaGraphConditionalHandle handle, const int32_t* counters) {
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         cudaGraphSetConditional(handle, counters[1] > 0 ? 1U : 0U);
     }
@@ -561,8 +562,9 @@ std::vector<torch::Tensor> run_championship_cuda(
 
     TORCH_CHECK(weights.size() == 8, "Native engine wymaga dokładnie 8 warstw conv");
     TORCH_CHECK(biases.size() == 8, "Native engine wymaga bias dla 8 warstw conv");
-    TORCH_CHECK(game_ids.is_cuda() && game_ids.scalar_type() == torch::kInt32 && game_ids.is_contiguous(),
-                "game_ids musi być CUDA int32 contiguous");
+    TORCH_CHECK(
+        game_ids.is_cuda() && game_ids.scalar_type() == torch::kInt32 && game_ids.is_contiguous(),
+        "game_ids musi być CUDA int32 contiguous");
     TORCH_CHECK(num_models >= 2 && num_models <= 65535, "Niepoprawna liczba modeli");
     TORCH_CHECK(slots64 >= 32 && slots64 <= 32768, "slots musi być w zakresie 32..32768");
     for (int i = 0; i < 8; ++i) {
@@ -577,24 +579,26 @@ std::vector<torch::Tensor> run_championship_cuda(
     TORCH_CHECK(total > 0, "Brak gier do rozegrania");
     TORCH_CHECK(weights[0].size(0) == models, "Liczba modeli w wagach != num_models");
 
-    // Exact architecture this engine is specialized for.
     const int expected_o[8] = {32, 32, 64, 64, 64, 96, 96, 96};
     const int expected_k[8] = {1600, 288, 288, 576, 576, 576, 864, 864};
     for (int i = 0; i < 8; ++i) {
         TORCH_CHECK(weights[i].dim() == 3, "Packed weight musi mieć [M,O,K]");
+        TORCH_CHECK(weights[i].size(0) == models, "Niepoprawne M w warstwie ", i);
         TORCH_CHECK(weights[i].size(1) == expected_o[i], "Niepoprawne O w warstwie ", i);
         TORCH_CHECK(weights[i].size(2) == expected_k[i], "Niepoprawne KPAD w warstwie ", i);
-        TORCH_CHECK(biases[i].sizes() == torch::IntArrayRef({models, expected_o[i]}),
-                    "Niepoprawny bias w warstwie ", i);
+        TORCH_CHECK(
+            biases[i].dim() == 2 && biases[i].size(0) == models && biases[i].size(1) == expected_o[i],
+            "Niepoprawny bias w warstwie ", i);
     }
-    TORCH_CHECK(policy_weight.sizes() == torch::IntArrayRef({models, STORAGE_C}),
-                "policy_weight musi mieć [M,96]");
+    TORCH_CHECK(
+        policy_weight.dim() == 2 && policy_weight.size(0) == models && policy_weight.size(1) == STORAGE_C,
+        "policy_weight musi mieć [M,96]");
 
     const int device = game_ids.get_device();
     CUDA_CHECK(cudaSetDevice(device));
-    cudaStream_t stream = at::cuda::getDefaultCUDAStream(device);
+    cudaStream_t stream = c10::cuda::getCurrentCUDAStream(device).stream();
 
-    auto dev = game_ids.device();
+    const auto dev = game_ids.device();
     auto opts_i64 = torch::TensorOptions().dtype(torch::kInt64).device(dev);
     auto opts_u8  = torch::TensorOptions().dtype(torch::kUInt8).device(dev);
     auto opts_i8  = torch::TensorOptions().dtype(torch::kInt8).device(dev);
@@ -638,7 +642,7 @@ std::vector<torch::Tensor> run_championship_cuda(
     }
     const half* policy_p = reinterpret_cast<const half*>(policy_weight.data_ptr<at::Half>());
 
-    int initial_active = total < slots ? total : slots;
+    const int initial_active = total < slots ? total : slots;
     init_counters_kernel<<<1, 1, 0, stream>>>(counters_p, initial_active);
     init_slots_kernel<<<(slots + 255) / 256, 256, 0, stream>>>(
         game_p, total, models, boards_p, active_p, player_p, stones_p, moves_p,
@@ -663,72 +667,62 @@ std::vector<torch::Tensor> run_championship_cuda(
     cudaGraph_t body = cp.conditional.phGraph_out[0];
 
     cudaGraphNode_t dep{};
-    const int MTILES = (HW + WM - 1) / WM;
+    constexpr int MTILES = (HW + WM - 1) / WM;
 
-    // Layer 0: 3 -> 32, 23x23, K padded 1587 -> 1600.
     {
         void* args[] = {&boards_p, &active_p, &player_p, &stones_p, &black_p, &white_p,
                         &w[0], &bs[0], &a_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_first_kernel<32,23,1600,32>,
                               dim3(slots * MTILES * 2), dim3(32), args);
     }
-    // 32 -> 32
     {
         void* args[] = {&a_p, &active_p, &player_p, &black_p, &white_p,
                         &w[1], &bs[1], &b_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_hidden_kernel<32,32,3,288,32>,
                               dim3(slots * MTILES * 2), dim3(32), args);
     }
-    // 32 -> 64
     {
         void* args[] = {&b_p, &active_p, &player_p, &black_p, &white_p,
                         &w[2], &bs[2], &a_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_hidden_kernel<32,64,3,288,64>,
                               dim3(slots * MTILES * 4), dim3(32), args);
     }
-    // 64 -> 64
     {
         void* args[] = {&a_p, &active_p, &player_p, &black_p, &white_p,
                         &w[3], &bs[3], &b_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_hidden_kernel<64,64,3,576,64>,
                               dim3(slots * MTILES * 4), dim3(32), args);
     }
-    // 64 -> 64
     {
         void* args[] = {&b_p, &active_p, &player_p, &black_p, &white_p,
                         &w[4], &bs[4], &a_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_hidden_kernel<64,64,3,576,64>,
                               dim3(slots * MTILES * 4), dim3(32), args);
     }
-    // 64 -> 96
     {
         void* args[] = {&a_p, &active_p, &player_p, &black_p, &white_p,
                         &w[5], &bs[5], &b_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_hidden_kernel<64,96,3,576,96>,
                               dim3(slots * MTILES * 6), dim3(32), args);
     }
-    // 96 -> 96
     {
         void* args[] = {&b_p, &active_p, &player_p, &black_p, &white_p,
                         &w[6], &bs[6], &a_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_hidden_kernel<96,96,3,864,96>,
                               dim3(slots * MTILES * 6), dim3(32), args);
     }
-    // 96 -> 96
     {
         void* args[] = {&a_p, &active_p, &player_p, &black_p, &white_p,
                         &w[7], &bs[7], &b_p, &slots};
         dep = add_kernel_node(body, dep, (void*)conv_hidden_kernel<96,96,3,864,96>,
                               dim3(slots * MTILES * 6), dim3(32), args);
     }
-    // Policy 1x1 + legal mask + argmax fused. Bias omitted: scalar per model cancels in argmax.
     {
-        void* args[] = {&b_p, &policy_p, &boards_p, &active_p, &player_p, &black_p, &white_p,
-                        &actions_p, &slots};
+        void* args[] = {&b_p, &policy_p, &boards_p, &active_p, &player_p,
+                        &black_p, &white_p, &actions_p, &slots};
         dep = add_kernel_node(body, dep, (void*)policy_argmax_kernel,
                               dim3(slots), dim3(256), args);
     }
-    // Game step + win/draw + device-side refill + result store.
     {
         void* args[] = {&actions_p, &game_p, &total, &models, &boards_p, &active_p,
                         &player_p, &stones_p, &moves_p, &black_p, &white_p, &queue_p,
@@ -736,7 +730,6 @@ std::vector<torch::Tensor> run_championship_cuda(
         dep = add_kernel_node(body, dep, (void*)game_step_kernel,
                               dim3((slots + 255) / 256), dim3(256), args);
     }
-    // Device decides whether the graph performs another move. No host round-trip.
     {
         void* args[] = {&handle, &counters_p};
         dep = add_kernel_node(body, dep, (void*)set_condition_kernel,
