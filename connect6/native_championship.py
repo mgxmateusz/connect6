@@ -247,6 +247,15 @@ def _write_ranking(matches_path: Path, ranking_path: Path, html_path: Path, refs
     )
 
 
+def _format_duration(seconds: float) -> str:
+    if not np.isfinite(seconds) or seconds < 0:
+        return "--:--:--"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def run(config_path: str | Path) -> None:
     config_path = Path(config_path).resolve()
     cfg = cnn._ORIGINAL_READ_YAML(config_path)
@@ -275,6 +284,7 @@ def run(config_path: str | Path) -> None:
 
     slots = int(native.get("slots", 4096))
     chunk_size = int(native.get("load_chunk_models", 32))
+    progress_chunks = max(1, int(native.get("progress_chunks", 100)))
     matches_path = output_dir / "matches.csv"
     ranking_path = output_dir / "ranking.csv"
     html_path = output_dir / "championship.html"
@@ -303,34 +313,96 @@ def run(config_path: str | Path) -> None:
     packed_gb = torch.cuda.memory_allocated(device) / 2**30
     print(f"[NATIVE] packed weights ready | alloc={packed_gb:.2f} GB")
 
-    game_ids = torch.from_numpy(game_ids_np).to(device=device, dtype=torch.int32)
+    # Split only on pair boundaries: both colour-swapped games for one pair are
+    # always completed and checkpointed together. Each native call is still a
+    # fully GPU-resident scheduler/graph with no host sync between moves. The CPU
+    # wakes up only about once per 1% to print progress and persist completed pairs.
+    total_run_pairs = int(pending_pairs.size)
+    total_run_games = int(game_ids_np.size)
+    num_batches = min(progress_chunks, total_run_pairs)
+    pair_bounds = np.linspace(0, total_run_pairs, num_batches + 1, dtype=np.int64)
+    percent_step = 100.0 / num_batches
+    print(
+        f"[NATIVE] start | {num_batches} porcji po ~{percent_step:.2f}% | "
+        "po każdej porcji progress + zapis matches.csv"
+    )
+
     torch.cuda.synchronize(device)
     torch.cuda.reset_peak_memory_stats(device)
-    started = time.perf_counter()
-    results_gpu, counters_gpu = extension.run_championship(
-        weights, biases, policy, game_ids, len(refs), slots
-    )
-    # Native function returns only after the device-side conditional graph has ended.
-    elapsed = time.perf_counter() - started
-    results = results_gpu.cpu().numpy().astype(np.int8, copy=False)
-    counters = counters_gpu.cpu().numpy()
-    completed = int(counters[2])
-    if completed != game_ids_np.size:
-        raise RuntimeError(f"GPU zakończył {completed}/{game_ids_np.size} gier")
+    wall_started = time.perf_counter()
+    native_elapsed = 0.0
+    completed_total = 0
 
-    gps = completed / max(elapsed, 1e-9)
+    for batch_index in range(num_batches):
+        pair_start = int(pair_bounds[batch_index])
+        pair_end = int(pair_bounds[batch_index + 1])
+        if pair_end <= pair_start:
+            continue
+
+        pair_batch = pending_pairs[pair_start:pair_end]
+        game_batch_np = game_ids_np[2 * pair_start: 2 * pair_end]
+        game_ids = torch.from_numpy(game_batch_np).to(device=device, dtype=torch.int32)
+        torch.cuda.synchronize(device)
+
+        batch_started = time.perf_counter()
+        results_gpu, counters_gpu = extension.run_championship(
+            weights, biases, policy, game_ids, len(refs), slots
+        )
+        # Native function returns only after this batch's device-side graph ends.
+        batch_elapsed = time.perf_counter() - batch_started
+        native_elapsed += batch_elapsed
+
+        results = results_gpu.cpu().numpy().astype(np.int8, copy=False)
+        counters = counters_gpu.cpu().numpy()
+        batch_completed = int(counters[2])
+        expected_games = int(game_batch_np.size)
+        if batch_completed != expected_games:
+            raise RuntimeError(
+                f"GPU zakończył {batch_completed}/{expected_games} gier w porcji "
+                f"{batch_index + 1}/{num_batches}"
+            )
+
+        # Persist every ~1%. If the process is stopped later, the next run will
+        # discover these pairs in matches.csv and resume from the remaining work.
+        _append_match_rows(matches_path, refs, pair_batch, results, batch_elapsed)
+
+        completed_total += batch_completed
+        progress = 100.0 * completed_total / total_run_games
+        batch_gps = batch_completed / max(batch_elapsed, 1e-9)
+        avg_gps = completed_total / max(native_elapsed, 1e-9)
+        remaining_games = total_run_games - completed_total
+        eta = remaining_games / max(avg_gps, 1e-9)
+        wall_elapsed_now = time.perf_counter() - wall_started
+        print(
+            f"[NATIVE {progress:6.2f}%] {completed_total:,}/{total_run_games:,} gier | "
+            f"batch={batch_gps:,.1f} g/s | avg={avg_gps:,.1f} g/s | "
+            f"ETA={_format_duration(eta)} | wall={_format_duration(wall_elapsed_now)} | zapisano"
+        )
+
+        del game_ids, results_gpu, counters_gpu, results, counters
+
+    wall_elapsed = time.perf_counter() - wall_started
+    completed = completed_total
+    if completed != total_run_games:
+        raise RuntimeError(f"GPU zakończył {completed}/{total_run_games} gier")
+
+    gps = completed / max(native_elapsed, 1e-9)
     peak = torch.cuda.max_memory_allocated(device) / 2**30
-    print(f"[NATIVE DONE] {completed:,} gier | {elapsed:.2f}s | {gps:,.1f} gier/s | peak VRAM={peak:.2f} GB")
+    print(
+        f"[NATIVE DONE] {completed:,} gier | native={native_elapsed:.2f}s | "
+        f"wall={wall_elapsed:.2f}s | {gps:,.1f} gier/s | peak VRAM={peak:.2f} GB"
+    )
 
-    print("[POST] zapis matches.csv i ranking — CPU pracuje dopiero po zakończeniu GPU")
-    _append_match_rows(matches_path, refs, pending_pairs, results, elapsed)
+    print("[POST] generuję ranking z checkpointowanego matches.csv")
     _write_ranking(matches_path, ranking_path, html_path, refs)
     meta = {
         "engine": "gpu_native_sm120_wmma_v1",
         "models": len(refs),
         "slots": slots,
+        "progress_chunks": num_batches,
         "games_completed_this_run": completed,
-        "elapsed_seconds": elapsed,
+        "elapsed_seconds": native_elapsed,
+        "wall_seconds_after_weights": wall_elapsed,
         "games_per_second": gps,
         "peak_vram_gb": peak,
     }
