@@ -12,11 +12,29 @@ extern "C" cudaError_t launch_tactical_bot_cuda(
     int batch,
     cudaStream_t stream);
 
+extern "C" cudaError_t launch_tactical_bot_v2_cuda(
+    const int8_t* boards,
+    const int8_t* current_player,
+    const int8_t* stones_left,
+    int64_t* actions,
+    int batch,
+    cudaStream_t stream);
 
-torch::Tensor tactical_bot_actions(
+using BotLaunchFn = cudaError_t (*)(
+    const int8_t*,
+    const int8_t*,
+    const int8_t*,
+    int64_t*,
+    int,
+    cudaStream_t);
+
+
+torch::Tensor tactical_bot_actions_impl(
     torch::Tensor boards,
     torch::Tensor current_player,
-    torch::Tensor stones_left) {
+    torch::Tensor stones_left,
+    BotLaunchFn launch,
+    const char* label) {
     TORCH_CHECK(boards.is_cuda(), "boards must be a CUDA tensor");
     TORCH_CHECK(current_player.is_cuda(), "current_player must be a CUDA tensor");
     TORCH_CHECK(stones_left.is_cuda(), "stones_left must be a CUDA tensor");
@@ -53,7 +71,7 @@ torch::Tensor tactical_bot_actions(
 
     const int device = boards_c.get_device();
     cudaStream_t stream = c10::cuda::getCurrentCUDAStream(device).stream();
-    const cudaError_t err = launch_tactical_bot_cuda(
+    const cudaError_t err = launch(
         boards_c.data_ptr<int8_t>(),
         player_c.data_ptr<int8_t>(),
         left_c.data_ptr<int8_t>(),
@@ -62,9 +80,36 @@ torch::Tensor tactical_bot_actions(
         stream);
     TORCH_CHECK(
         err == cudaSuccess,
-        "GPU tactical bot kernel launch failed: ",
+        label,
+        " kernel launch failed: ",
         cudaGetErrorString(err));
     return actions;
+}
+
+
+torch::Tensor tactical_bot_actions(
+    torch::Tensor boards,
+    torch::Tensor current_player,
+    torch::Tensor stones_left) {
+    return tactical_bot_actions_impl(
+        boards,
+        current_player,
+        stones_left,
+        launch_tactical_bot_cuda,
+        "GPU Tactical Bot V1");
+}
+
+
+torch::Tensor tactical_bot_v2_actions(
+    torch::Tensor boards,
+    torch::Tensor current_player,
+    torch::Tensor stones_left) {
+    return tactical_bot_actions_impl(
+        boards,
+        current_player,
+        stones_left,
+        launch_tactical_bot_v2_cuda,
+        "GPU Tactical Bot V2");
 }
 
 
@@ -72,5 +117,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "tactical_bot_actions",
         &tactical_bot_actions,
-        "Connect6 one-pass tactical bot actions on CUDA");
+        "Connect6 GPU Tactical Bot V1 actions");
+    m.def(
+        "tactical_bot_v2_actions",
+        &tactical_bot_v2_actions,
+        "Connect6 GPU Tactical Bot V2 actions");
 }
