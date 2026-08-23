@@ -109,12 +109,33 @@ def _find_x64_tool_bin(toolset_root: Path) -> Path | None:
     return None
 
 
-def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
-    """Select newest COMPLETE MSVC toolset compatible with CUDA 12.9.
+def _toolset_is_complete(toolset_root: Path, bin_dir: Path | None) -> tuple[bool, str]:
+    """Require the compiler, STL headers and x64 CRT/STL import libraries."""
+    if bin_dir is None:
+        return False, "brak cl.exe/link.exe target x64"
 
-    A directory under VC/Tools/MSVC is not enough: optional v143 libraries can
-    create a version directory without cl.exe. We therefore only rank toolsets
-    that actually contain cl.exe + link.exe capable of targeting x64.
+    include_dir = toolset_root / "include"
+    lib_dir = toolset_root / "lib" / "x64"
+    required = [
+        include_dir / "vector",
+        include_dir / "yvals_core.h",
+        lib_dir / "msvcprt.lib",
+        lib_dir / "msvcrt.lib",
+        lib_dir / "vcruntime.lib",
+    ]
+    missing = [str(path.relative_to(toolset_root)) for path in required if not path.is_file()]
+    if missing:
+        return False, "brak: " + ", ".join(missing)
+    return True, ""
+
+
+def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
+    """Select newest fully linkable MSVC toolset compatible with CUDA 12.9.
+
+    Some optional VS Installer components create an MSVC version directory with
+    only headers, libraries or compiler binaries. A usable CUDA host toolchain
+    must have all of them, so rank only toolsets containing x64 cl/link, STL
+    headers and the x64 C/C++ runtime libraries.
 
     Returns (vcvars64.bat, selector, full_version, toolset_root, bin_dir).
     """
@@ -141,10 +162,12 @@ def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
 
             toolset_root = vc_root / "Tools" / "MSVC" / full_version
             bin_dir = _find_x64_tool_bin(toolset_root)
-            if bin_dir is None:
-                incomplete.append(f"{full_version}: brak cl.exe/link.exe target x64")
+            complete, reason = _toolset_is_complete(toolset_root, bin_dir)
+            if not complete:
+                incomplete.append(f"{full_version}: {reason}")
                 continue
 
+            assert bin_dir is not None
             compatible.append((key, full_version, vcvars, toolset_root, bin_dir))
 
     if not compatible:
@@ -154,7 +177,8 @@ def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
         )
         raise RuntimeError(
             "Nie znaleziono kompletnego toolsetu MSVC zgodnego z CUDA 12.9.\n"
-            "Potrzebny jest v143 / VS 2022 C++ x64/x86 build tools z cl.exe i link.exe.\n"
+            "Potrzebny jest v143 / VS 2022 C++ x64/x86 build tools z kompilatorem, "
+            "nagłówkami i bibliotekami runtime x64.\n"
             f"Wykryte toolsety:\n{details}\n"
             f"Niekompletne kompatybilne katalogi:\n{incomplete_details}"
         )
