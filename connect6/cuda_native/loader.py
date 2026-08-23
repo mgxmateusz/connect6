@@ -104,38 +104,18 @@ def _find_x64_tool_bin(toolset_root: Path) -> Path | None:
         if key in seen:
             continue
         seen.add(key)
-        if (bin_dir / "cl.exe").is_file() and (bin_dir / "link.exe").is_file():
+        if (bin_dir / "cl.exe").is_file():
             return bin_dir
     return None
 
 
-def _toolset_is_complete(toolset_root: Path, bin_dir: Path | None) -> tuple[bool, str]:
-    """Require the compiler, STL headers and x64 CRT/STL import libraries."""
-    if bin_dir is None:
-        return False, "brak cl.exe/link.exe target x64"
+def _select_cuda_host_toolchain() -> tuple[Path, str, str, Path, Path]:
+    """Select newest installed pre-v145 MSVC compiler usable by CUDA 12.9.
 
-    include_dir = toolset_root / "include"
-    lib_dir = toolset_root / "lib" / "x64"
-    required = [
-        include_dir / "vector",
-        include_dir / "yvals_core.h",
-        lib_dir / "msvcprt.lib",
-        lib_dir / "msvcrt.lib",
-        lib_dir / "vcruntime.lib",
-    ]
-    missing = [str(path.relative_to(toolset_root)) for path in required if not path.is_file()]
-    if missing:
-        return False, "brak: " + ", ".join(missing)
-    return True, ""
-
-
-def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
-    """Select newest fully linkable MSVC toolset compatible with CUDA 12.9.
-
-    Some optional VS Installer components create an MSVC version directory with
-    only headers, libraries or compiler binaries. A usable CUDA host toolchain
-    must have all of them, so rank only toolsets containing x64 cl/link, STL
-    headers and the x64 C/C++ runtime libraries.
+    Visual Studio 2026 can install legacy v143 compiler/header components without
+    duplicating the old runtime libraries. That is fine: NVCC only needs the
+    compatible host compiler and matching headers. Final C++ compilation and
+    linking use the current complete MSVC toolset initialized by vcvars64.bat.
 
     Returns (vcvars64.bat, selector, full_version, toolset_root, bin_dir).
     """
@@ -157,14 +137,23 @@ def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
             detected.append(f"{vc_root}: " + ", ".join(v for _, v in toolsets))
 
         for key, full_version in toolsets:
+            # CUDA 12.9 rejects VS2026/v145 (_MSC_VER >= 1950). Any installed
+            # VS2022-era v143 compiler below 14.50 is a candidate.
             if not ((14, 10) <= key < (14, 50)):
                 continue
 
             toolset_root = vc_root / "Tools" / "MSVC" / full_version
             bin_dir = _find_x64_tool_bin(toolset_root)
-            complete, reason = _toolset_is_complete(toolset_root, bin_dir)
-            if not complete:
-                incomplete.append(f"{full_version}: {reason}")
+            include_dir = toolset_root / "include"
+            missing: list[str] = []
+            if bin_dir is None:
+                missing.append("cl.exe target x64")
+            if not (include_dir / "vector").is_file():
+                missing.append("include\\vector")
+            if not (include_dir / "yvals_core.h").is_file():
+                missing.append("include\\yvals_core.h")
+            if missing:
+                incomplete.append(f"{full_version}: brak: " + ", ".join(missing))
                 continue
 
             assert bin_dir is not None
@@ -176,9 +165,8 @@ def _select_windows_toolchain() -> tuple[Path, str, str, Path, Path]:
             "\n".join(incomplete) if incomplete else "(brak kompatybilnych katalogów v143)"
         )
         raise RuntimeError(
-            "Nie znaleziono kompletnego toolsetu MSVC zgodnego z CUDA 12.9.\n"
-            "Potrzebny jest v143 / VS 2022 C++ x64/x86 build tools z kompilatorem, "
-            "nagłówkami i bibliotekami runtime x64.\n"
+            "Nie znaleziono kompilatora MSVC zgodnego z CUDA 12.9.\n"
+            "Potrzebny jest v143 / VS 2022 C++ x64/x86 build tools z cl.exe i nagłówkami.\n"
             f"Wykryte toolsety:\n{details}\n"
             f"Niekompletne kompatybilne katalogi:\n{incomplete_details}"
         )
@@ -233,8 +221,9 @@ def _run_vcvars_and_capture_environment(
 
     combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
     if proc.returncode != 0:
+        selector_text = f" (-vcvars_ver={vcvars_ver})" if vcvars_ver else ""
         raise RuntimeError(
-            f"vcvars64.bat (-vcvars_ver={vcvars_ver}) zwrócił błąd:\n"
+            f"vcvars64.bat{selector_text} zwrócił błąd:\n"
             + (combined if combined else "(brak komunikatu)")
         )
 
@@ -260,76 +249,85 @@ def _prepend_env_path(variable: str, path: Path) -> None:
         os.environ[variable] = item + (os.pathsep + current if current else "")
 
 
-def _prepend_path(path: Path) -> None:
-    _prepend_env_path("PATH", path)
+def _msvc_toolset_root_from_cl(cl_path: Path) -> Path:
+    """Return .../VC/Tools/MSVC/<version> from .../bin/Host*/x64/cl.exe."""
+    resolved = cl_path.resolve()
+    try:
+        root = resolved.parents[3]
+    except IndexError as exc:
+        raise RuntimeError(f"Nieprawidłowa ścieżka cl.exe: {resolved}") from exc
+    if root.parent.name.lower() != "msvc":
+        raise RuntimeError(f"Nie rozpoznano katalogu toolsetu MSVC dla: {resolved}")
+    return root
 
 
 def _bootstrap_msvc_environment() -> None:
     if platform.system() != "Windows":
         return
 
-    vcvars, selector, full_version, toolset_root, bin_dir = _select_windows_toolchain()
-    tool_include = toolset_root / "include"
-    tool_lib = toolset_root / "lib" / "x64"
-    msvcprt = tool_lib / "msvcprt.lib"
+    vcvars, selector, cuda_host_version, cuda_host_root, cuda_host_bin = (
+        _select_cuda_host_toolchain()
+    )
+    cuda_host_include = cuda_host_root / "include"
 
-    if not tool_include.is_dir() or not tool_lib.is_dir() or not msvcprt.is_file():
+    # Important split for VS2026 + CUDA 12.9:
+    # - initialize the CURRENT/default MSVC toolset (v145) for normal C++, link,
+    #   Windows SDK and runtime libraries;
+    # - pass the legacy v143 compiler explicitly to NVCC via -ccbin, together
+    #   with its matching STL headers. CUDA validates only that host compiler.
+    # This also makes PyTorch's Windows ninja linker select the current link.exe,
+    # because it derives link.exe from the first cl.exe found in PATH.
+    env = _run_vcvars_and_capture_environment(vcvars, None)
+    os.environ.update(env)
+
+    runtime_cl = shutil.which("cl.exe")
+    runtime_link = shutil.which("link.exe")
+    if not runtime_cl or not runtime_link:
         raise RuntimeError(
-            "Wybrany v143 ma kompilator x64, ale brakuje jego nagłówków/bibliotek runtime.\n"
-            f"Toolset: {toolset_root}\n"
-            f"include: {tool_include} (exists={tool_include.is_dir()})\n"
-            f"lib x64: {tool_lib} (exists={tool_lib.is_dir()})\n"
-            f"msvcprt.lib: {msvcprt} (exists={msvcprt.is_file()})\n"
-            "W Visual Studio Installer doinstaluj pełny komponent "
-            "'MSVC v143 - VS 2022 C++ x64/x86 build tools'."
+            "Domyślne vcvars64.bat nie wystawiło cl.exe/link.exe do PATH.\n"
+            f"vcvars={vcvars}\nPATH={os.environ.get('PATH', '')}"
         )
 
-    # vcvars supplies Windows SDK/UCRT paths. Then force every MSVC-specific
-    # path to the exact same complete v143 toolset so VS2026/v145 cannot leak
-    # into compilation or linking.
-    env = _run_vcvars_and_capture_environment(vcvars, selector)
-    os.environ.update(env)
-    _prepend_path(bin_dir)
-    _prepend_env_path("INCLUDE", tool_include)
-    _prepend_env_path("LIB", tool_lib)
-    _prepend_env_path("LIBPATH", tool_lib)
+    runtime_root = _msvc_toolset_root_from_cl(Path(runtime_cl))
+    runtime_lib = runtime_root / "lib" / "x64"
+    required_runtime = [
+        runtime_lib / "msvcprt.lib",
+        runtime_lib / "msvcrt.lib",
+        runtime_lib / "vcruntime.lib",
+    ]
+    missing_runtime = [p.name for p in required_runtime if not p.is_file()]
+    if missing_runtime:
+        raise RuntimeError(
+            "Domyślny toolset MSVC nie ma bibliotek runtime x64.\n"
+            f"Toolset: {runtime_root}\n"
+            f"lib x64: {runtime_lib} (exists={runtime_lib.is_dir()})\n"
+            f"Brak: {', '.join(missing_runtime)}"
+        )
 
-    cl_path = bin_dir / "cl.exe"
-    link_path = bin_dir / "link.exe"
+    # Ensure the current runtime libraries are explicit even if vcvars ordering
+    # changes in a future VS update.
+    _prepend_env_path("LIB", runtime_lib)
+    _prepend_env_path("LIBPATH", runtime_lib)
 
-    os.environ["VCToolsInstallDir"] = str(toolset_root) + os.sep
-    os.environ["VCToolsVersion"] = full_version
-    os.environ["CONNECT6_MSVC_LIB_X64"] = str(tool_lib)
+    os.environ["CONNECT6_NVCC_CCBIN"] = str(cuda_host_bin)
+    os.environ["CONNECT6_NVCC_MSVC_INCLUDE"] = str(cuda_host_include)
+    os.environ["CONNECT6_MSVC_LIB_X64"] = str(runtime_lib)
     os.environ["DISTUTILS_USE_SDK"] = "1"
     os.environ["MSSdk"] = "1"
 
-    cl = shutil.which("cl.exe")
-    link = shutil.which("link.exe")
-    if not cl or not link:
-        raise RuntimeError(
-            "Wewnętrzny błąd konfiguracji PATH: wybrane binarki istnieją, ale system ich nie widzi.\n"
-            f"cl={cl_path}\nlink={link_path}\nPATH={os.environ.get('PATH', '')}"
-        )
+    cuda_cl = cuda_host_bin / "cl.exe"
+    if not cuda_cl.is_file():
+        raise RuntimeError(f"Zniknął wybrany host compiler CUDA: {cuda_cl}")
 
-    selected_root = str(toolset_root.resolve()).lower()
-    if not str(Path(cl).resolve()).lower().startswith(selected_root):
-        raise RuntimeError(
-            "PATH wskazuje inny cl.exe niż wybrany kompletny v143.\n"
-            f"Wybrany: {cl_path}\nZnaleziony: {cl}"
-        )
-
-    cl_lower = cl.lower().replace("/", "\\")
-    m = re.search(r"\\msvc\\(\d+)\.(\d+)", cl_lower)
-    if m and (int(m.group(1)), int(m.group(2))) >= (14, 50):
-        raise RuntimeError(
-            f"Wybrano nieobsługiwany kompilator mimo wymuszenia v143: {cl}"
-        )
-
-    print(f"[NATIVE BUILD] MSVC selector: {selector} ({full_version})")
-    print(f"[NATIVE BUILD] host layout: {bin_dir.parent.name} -> x64")
-    print(f"[NATIVE BUILD] cl.exe: {cl}")
-    print(f"[NATIVE BUILD] link.exe: {link}")
-    print(f"[NATIVE BUILD] MSVC lib x64: {tool_lib}")
+    print(f"[NATIVE BUILD] C++/link MSVC: {runtime_root.name}")
+    print(f"[NATIVE BUILD] C++ cl.exe: {runtime_cl}")
+    print(f"[NATIVE BUILD] link.exe: {runtime_link}")
+    print(
+        f"[NATIVE BUILD] CUDA host MSVC: {selector} ({cuda_host_version}) "
+        f"| {cuda_cl}"
+    )
+    print(f"[NATIVE BUILD] CUDA host include: {cuda_host_include}")
+    print(f"[NATIVE BUILD] MSVC runtime lib x64: {runtime_lib}")
 
 
 def _require_environment() -> None:
@@ -377,13 +375,26 @@ def load_native_championship_extension(*, verbose: bool = True):
             "-gencode=arch=compute_120,code=sm_120",
         ]
         ldflags: list[str] = []
+
         if is_windows:
-            msvc_lib = os.environ.get("CONNECT6_MSVC_LIB_X64")
-            if msvc_lib:
-                ldflags.append(f"/LIBPATH:{msvc_lib}")
+            ccbin = os.environ.get("CONNECT6_NVCC_CCBIN")
+            cuda_msvc_include = os.environ.get("CONNECT6_NVCC_MSVC_INCLUDE")
+            runtime_lib = os.environ.get("CONNECT6_MSVC_LIB_X64")
+            if not ccbin or not cuda_msvc_include or not runtime_lib:
+                raise RuntimeError("Brak wewnętrznej konfiguracji mieszanego toolchainu MSVC.")
+
+            # torch.utils.cpp_extension quotes Windows arguments containing
+            # spaces, so keep each NVCC option as one argument.
+            cuda_flags.extend(
+                [
+                    f"-ccbin={ccbin}",
+                    f"-I{cuda_msvc_include}",
+                ]
+            )
+            ldflags.append(f"/LIBPATH:{runtime_lib}")
 
         _EXTENSION = load(
-            name="connect6_cuda_championship_sm120_v11",
+            name="connect6_cuda_championship_sm120_v12",
             sources=sources,
             extra_cflags=cflags,
             extra_cuda_cflags=cuda_flags,
