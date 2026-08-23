@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <vector>
 
-using namespace nvcuda;
+namespace wmma = nvcuda::wmma;
 
 namespace {
 
