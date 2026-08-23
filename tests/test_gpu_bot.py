@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
-from connect6.gpu_bot import GPUTacticalBot
+from connect6.bots.gpu_bot import GPUTacticalBot
 
 
 pytestmark = pytest.mark.skipif(
@@ -48,7 +48,6 @@ def test_gpu_bot_first_stone_sets_up_two_stone_win():
     rr, cc = divmod(second, 19)
     board[rr, cc] = 1
 
-    # The greedy second evaluation must now finish at least one six-stone line.
     found = False
     for dr, dc in ((0, 1), (1, 0), (1, 1), (1, -1)):
         for row in range(19):
