@@ -40,10 +40,16 @@ GUI:
 python run_gui.py
 ```
 
-Benchmark:
+Benchmark treningowy:
 
 ```bat
 python run_benchmark.py --config configs/train.yaml --steps 500
+```
+
+Championship:
+
+```bat
+python run_championship.py
 ```
 
 Testy:
@@ -51,6 +57,32 @@ Testy:
 ```bat
 pytest -q
 ```
+
+## GPU-native championship — RTX 5070 / SM120
+
+`run_championship.py` używa osobnego, natywnego silnika CUDA wyspecjalizowanego dla aktualnej architektury CNN i Connect6 19x19. Stary Pythonowy scheduler i championship autotuner nie znajdują się w hot-path.
+
+Wymagania dodatkowe na Windows:
+
+- RTX 50 / compute capability 12.0;
+- CUDA Toolkit **12.8 lub nowszy** z `nvcc` dostępnym przez `CUDA_HOME`;
+- Visual Studio Build Tools z workloadem **Desktop development with C++**;
+- `ninja` instalowany przez `requirements.txt`.
+
+Pierwsze uruchomienie kompiluje rozszerzenie CUDA pod `sm_120`. Wynik jest cache'owany przez PyTorch, więc kolejne uruchomienia używają gotowej binarki dopóki źródła CUDA lub środowisko kompilacji się nie zmienią.
+
+Hot-path turnieju pozostaje na GPU:
+
+- checkpointy są jednorazowo przepakowywane do FP16 w układzie używanym bezpośrednio przez WMMA;
+- stan plansz jest przechowywany jako bitboardy;
+- pierwsza warstwa odtwarza kanały `moje / przeciwnika / ostatni kamień tury` bez materializowania tensora wejściowego;
+- warstwy CNN używają własnego implicit-GEMM WMMA FP16 z akumulacją FP32;
+- nie ma `F.unfold`, `index_select` wag ani per-move transferów CPU/GPU;
+- policy, maskowanie legalnych ruchów i `argmax` są scalone;
+- GPU samo wykrywa koniec gry, zapisuje wynik i pobiera następny job;
+- cała pętla ruchów działa jako conditional CUDA Graph `WHILE` i nie wraca do CPU między ruchami.
+
+Domyślnie `configs/championship.yaml` używa 4096 stale dostępnych slotów GPU. Po zakończeniu device-side przebiegu CPU służy już tylko do zapisania `matches.csv`, `ranking.csv`, `championship.html` i `native_run.json`.
 
 ## Wejście modelu
 
@@ -141,7 +173,7 @@ Przy `resume: "auto"` trening wznawia najnowszy checkpoint z tego runu. Zmiana n
 
 ## GUI i ewaluacja
 
-GUI, benchmark oraz model-vs-model korzystają z tego samego `network_input()`, więc pracują bezpośrednio z wejściem CNN.
+GUI, benchmark treningowy oraz model-vs-model korzystają z tego samego `network_input()`, więc pracują bezpośrednio z wejściem CNN.
 
 ```bat
 python run_gui.py
