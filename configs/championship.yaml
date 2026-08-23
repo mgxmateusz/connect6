@@ -9,7 +9,7 @@ championship:
 
   # FINALNE USTAWIENIA RUNTIME.
   # Po jednorazowym benchmarku wpisz tutaj zwycięskie wartości.
-  tables: 384
+  tables: 128
 
   games_per_pair: 2
   temperature: 0.0
@@ -28,8 +28,8 @@ championship:
     vram_check_every_forwards: 32
 
     # FINALNE USTAWIENIA RUNTIME.
-    sync_interval_moves: 1
-    refill_batch: 32
+    sync_interval_moves: 4
+    refill_batch: 64
 
     progress_every_seconds: 5.0
     progress_every_matches: 500
