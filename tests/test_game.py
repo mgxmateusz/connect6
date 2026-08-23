@@ -1,8 +1,8 @@
 import numpy as np
 import torch
 
-from connect6.game import BLACK, WHITE, Connect6Game
-from connect6.vector_env import VectorConnect6
+from connect6.engine.game import BLACK, WHITE, Connect6Game
+from connect6.engine.vector_env import VectorConnect6
 
 
 def test_opening_and_two_stone_turns():
@@ -50,13 +50,13 @@ def test_observation_shape_and_channels():
     assert network_input.dtype == np.float32
     assert not network_input[0].any()
     assert not network_input[1].any()
-    assert network_input[2].all()  # opening = ostatni jedyny kamień tej tury
+    assert network_input[2].all()
 
     g.step(g.rc_to_action(9, 9))
     white_input = g.network_input()
     assert white_input.shape == (3, 19, 19)
     assert white_input[1, 9, 9] == 1.0
-    assert not white_input[2].any()  # biały zaczyna turę z dwoma kamieniami
+    assert not white_input[2].any()
 
 
 def test_vector_env_cpu_device():
