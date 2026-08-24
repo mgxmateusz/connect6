@@ -1,15 +1,11 @@
 # =============================================================================
-# KONFIGURACJA TRENINGU CONNECT6 - CNN V5
+# KONFIGURACJA TRENINGU CONNECT6 - CNN V6
 # =============================================================================
 
 run:
-  name: "connect6_cnn_02"
+  name: "connect6_cnn_03"
   root_dir: "runs"
   seed: 42
-
-  # auto = wznów z runs/<name>/checkpoints/latest.pt, jeśli istnieje
-  # none = rozpocznij od zera
-  # można też podać bezpośrednią ścieżkę do konkretnego pliku .pt
   resume: "auto"
 
 game:
@@ -18,43 +14,32 @@ game:
   debug_checks: false
 
 model:
-  architecture_version: 5
+  architecture_version: 6
 
-  # Backbone zachowuje 19x19 przez cały model (stride=1, same padding).
-  # Każdy blok: Conv -> GroupNorm (8 kanałów/grupę) -> SiLU.
-  # Receptive field: 23 -> 25 -> 27 -> 29 -> 31 -> 33 -> 35 -> 37.
+  # Backbone 19x19. GroupNorm tylko po warstwach 0, 2, 5 i 7,
+  # zamiast po wszystkich ośmiu convach. Aktywne GN nadal mają 8 kanałów/grupę.
   kernels: [23, 3, 3, 3, 3, 3, 3, 3]
   channels: [32, 32, 64, 64, 64, 96, 96, 96]
 
   # Wejście [B,4,19,19]: moje, przeciwnika, maska planszy, ostatni kamień tury.
   # POLICY: Conv 1x1, 96 -> 1 -> 361 logitów.
   # VALUE:  Conv 1x1, 96 -> 1 -> global mean -> tanh.
-
   compile: false
-  compile_mode: "default"  # default | reduce-overhead | max-autotune
+  compile_mode: "default"
 
 training:
   device: "cuda"
-
-  # Liczba plansz rozgrywanych równolegle.
   num_envs: 2048
 
   # Target pełnych pozycji na update = num_envs * completed_positions_per_update.
-  # 384 zachowuje ~ten sam docelowy rozmiar PPO co wcześniejsze 768*minibatch(1024),
-  # ale parametr nie zależy już od wielkości minibatcha.
   completed_positions_per_update: 384
-
-  # Maksymalny numer update'u. Update'y są numerowane od 1.
   updates: 10000000
 
-  # --------------------------------------------------------------------------
-  # PPO / CREDIT ASSIGNMENT
-  # --------------------------------------------------------------------------
   ppo_epochs: 3
   minibatch_size: 1024
 
   learning_rate: 0.0002
-  lr_schedule: "cosine"     # constant | cosine
+  lr_schedule: "cosine"
   weight_decay: 0.0001
   adam_eps: 0.00001
   clip_coef: 0.2
@@ -68,55 +53,26 @@ training:
   normalize_advantage: true
   gamma: 0.98
 
-  # D4 nadal ma sens dla zwykłego CNN: konwolucja daje ekwiwariancję na
-  # przesunięcia, ale nie gwarantuje ekwiwariancji na obrót i odbicie.
   symmetry_augmentation: true
-
-  # Losowe otwarcie zostaje jako eksploracja i wymuszanie różnorodności pozycji.
-  # Ruch jest wykluczony z PPO, więc model nie uczy się z wymuszonej decyzji.
   random_black_opening_fraction: 0.50
 
-  # --------------------------------------------------------------------------
-  # PRZECIWNICY PODCZAS COLLECTU
-  # --------------------------------------------------------------------------
-  # 50% stołów: current vs current
-  # 25% stołów: current vs historical
-  # 25% stołów: current vs GPU tactical bot
+  # 50% current/self-play, 25% history, 25% GPU tactical bot.
   historical_fraction: 0.25
   bot_fraction: 0.25
   bot_v1_fraction: 0.50
-
-  # Historyczne checkpointy są losowane niezależnie z powtórzeniami:
-  # 50% z całej historii, 25% z ostatniej połowy, 25% z ostatniej ćwiartki.
   historical_models_per_update: 128
   historical_ram_cache_models: 1024
 
-  # --------------------------------------------------------------------------
-  # GPU ROLLOUT
-  # --------------------------------------------------------------------------
-  # Stan gier i boty pozostają na GPU; current CNN korzysta z szybkiej ścieżki
-  # PyTorch/cuDNN, a historia z grupowanych konwolucji GPU.
   native_compile_verbose: false
-
-  # --------------------------------------------------------------------------
-  # CUDA MEMORY CACHE
-  # --------------------------------------------------------------------------
-  # run_train.py czyści cache dopiero po osiągnięciu 10 GB reserved VRAM.
   cuda_cache_clear_every_percent: 0.0
 
-  # --------------------------------------------------------------------------
-  # EKSPLORACJA PODCZAS SELF-PLAY
-  # --------------------------------------------------------------------------
   temperature_start: 1.00
   temperature_end: 1.00
   temperature_decay_updates: 5000
 
-  # BF16 na RTX 5070 ma znacznie większy zakres wykładnika niż FP16, nie wymaga
-  # GradScalera i odpowiada stabilnej konfiguracji używanej przez wcześniejszy CNN.
-  # Jest też lepszym wyborem dla PPO z GroupNorm, gdzie FP16 potrafił generować
-  # overflow gradientów mimo loss scalingu.
+  # BF16: duży zakres wykładnika, brak GradScalera i dobra ścieżka tensor-core.
   amp: true
-  amp_dtype: "bfloat16"      # float16 | bfloat16
+  amp_dtype: "bfloat16"
 
   checkpoint_every_updates: 1
   dashboard_every_updates: 1
