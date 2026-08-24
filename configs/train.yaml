@@ -92,10 +92,10 @@ training:
   historical_ram_cache_models: 1024
 
   # --------------------------------------------------------------------------
-  # GPU-NATIVE ROLLOUT
+  # GPU ROLLOUT
   # --------------------------------------------------------------------------
-  # Collector pakuje current+history do FP16 WMMA i wykonuje cały move loop
-  # wewnątrz CUDA Graph conditional while. Python wraca dopiero po gotowym buforze.
+  # Stan gier i boty pozostają na GPU; current CNN korzysta z szybkiej ścieżki
+  # PyTorch/cuDNN, a historia z grupowanych konwolucji GPU.
   native_compile_verbose: false
 
   # --------------------------------------------------------------------------
@@ -111,10 +111,12 @@ training:
   temperature_end: 1.00
   temperature_decay_updates: 5000
 
-  # FP16 odpowiada precyzji natywnego collectora, dzięki czemu old_logprob z
-  # rolloutu i pierwszy forward PPO nie różnią się tylko przez BF16 vs FP16.
+  # BF16 na RTX 5070 ma znacznie większy zakres wykładnika niż FP16, nie wymaga
+  # GradScalera i odpowiada stabilnej konfiguracji używanej przez wcześniejszy CNN.
+  # Jest też lepszym wyborem dla PPO z GroupNorm, gdzie FP16 potrafił generować
+  # overflow gradientów mimo loss scalingu.
   amp: true
-  amp_dtype: "float16"       # float16 | bfloat16
+  amp_dtype: "bfloat16"      # float16 | bfloat16
 
   checkpoint_every_updates: 1
   dashboard_every_updates: 1
