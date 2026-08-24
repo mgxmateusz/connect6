@@ -40,15 +40,38 @@ def load_native_rollout_extension(*, verbose: bool = False):
         )
 
     root = Path(__file__).resolve().parent
-    sources = [
-        str(root / "native_rollout.cpp"),
-        str(root / "native_rollout_kernel.cu"),
-    ]
 
-    extension_name = "connect6_cuda_rollout_sm120_v1"
+    # CUDA 12.9 + the legacy v143 host compiler used for NVCC can hit an MSVC
+    # namespace collision while parsing torch/extension.h from a .cu translation
+    # unit (compiled_autograd.h vs CUDAStream.h).  Python bindings remain in the
+    # pure C++ file; the CUDA TU needs only Tensor/C++ API types.  Build a tiny
+    # generated compatibility copy using torch/types.h, which is the upstream
+    # recommended Windows workaround for this class of NVCC header failures.
+    extension_name = "connect6_cuda_rollout_sm120_v2"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
+
+    kernel_src = root / "native_rollout_kernel.cu"
+    kernel_text = kernel_src.read_text(encoding="utf-8")
+    old_include = "#include <torch/extension.h>"
+    new_include = "#include <torch/types.h>"
+    if old_include not in kernel_text:
+        raise RuntimeError(
+            "Nie znaleziono oczekiwanego include torch/extension.h w native_rollout_kernel.cu"
+        )
+    compat_text = kernel_text.replace(old_include, new_include, 1)
+    compat_kernel = build_directory / "native_rollout_kernel_compat.cu"
+    if not compat_kernel.exists() or compat_kernel.read_text(encoding="utf-8") != compat_text:
+        compat_kernel.write_text(compat_text, encoding="utf-8")
+
+    # The generated CUDA file still includes native_rollout_bot.cuh by name.
+    # Add the real source directory to NVCC's include search path rather than
+    # copying headers into the build cache.
+    sources = [
+        str(root / "native_rollout.cpp"),
+        str(compat_kernel),
+    ]
 
     lock_file = build_directory / "lock"
     if lock_file.exists():
@@ -74,12 +97,14 @@ def load_native_rollout_extension(*, verbose: bool = False):
         cflags = ["/O2", "/std:c++17"] if is_windows else ["-O3", "-std=c++17"]
         cuda_flags = [
             "-O3",
+            "-DUSE_CUDA",
             "--use_fast_math",
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "-lineinfo",
             "-std=c++17",
             "-gencode=arch=compute_120,code=sm_120",
+            f"-I{root}",
         ]
         ldflags: list[str] = []
 
