@@ -4,7 +4,6 @@ import argparse
 import math
 import time
 from pathlib import Path
-from typing import Any
 
 import torch
 from torch import nn
@@ -17,13 +16,7 @@ from .logger import TrainingLogger
 from .model import build_model, mask_logits
 from .native_rollout import NativeRolloutCollector, build_rollout_assignments
 from .native_rollout_state import pack_rollout_models
-from .train import (
-    _autocast_context,
-    _learning_rate,
-    _mean,
-    _percentile,
-    _temperature,
-)
+from .train import _autocast_context, _learning_rate, _mean, _percentile, _temperature
 from .utils import resolve_device, seed_everything
 from .vector_env import canonical_network_input
 
@@ -42,17 +35,17 @@ def train(config_path: str | Path) -> None:
     model_cfg = cfg["model"]
     tr = cfg["training"]
 
-    if int(model_cfg.get("architecture_version", 0)) != 5:
-        raise RuntimeError("GPU-native training V5 wymaga architecture_version=5")
+    if int(model_cfg.get("architecture_version", 0)) != 6:
+        raise RuntimeError("GPU training wymaga architecture_version=6")
 
     seed = int(run_cfg.get("seed", 42))
     seed_everything(seed)
     device = resolve_device(str(tr.get("device", "cuda")))
     if device.type != "cuda":
-        raise RuntimeError("GPU-native V5 collector wymaga CUDA")
+        raise RuntimeError("GPU collector wymaga CUDA")
     if torch.cuda.get_device_capability(device) != (12, 0):
         raise RuntimeError(
-            "GPU-native V5 collector jest aktualnie strojony pod SM120/RTX 50; "
+            "Collector jest aktualnie strojony pod SM120/RTX 50; "
             f"wykryto {torch.cuda.get_device_capability(device)}"
         )
     torch.set_float32_matmul_precision("high")
@@ -60,7 +53,7 @@ def train(config_path: str | Path) -> None:
     board_size = int(game_cfg.get("board_size", 19))
     win_length = int(game_cfg.get("win_length", 6))
     if board_size != 19 or win_length != 6:
-        raise RuntimeError("Native rollout V5 wymaga Connect6 19x19, win_length=6")
+        raise RuntimeError("Rollout wymaga Connect6 19x19, win_length=6")
 
     num_envs = int(tr.get("num_envs", 2048))
     completed_per_env = int(tr.get("completed_positions_per_update", 384))
@@ -72,25 +65,16 @@ def train(config_path: str | Path) -> None:
     if minibatch_size <= 0 or total_updates <= 0:
         raise ValueError("minibatch_size i updates muszą być > 0")
 
-    historical_fraction = _validate_fraction(
-        "historical_fraction", tr.get("historical_fraction", 0.25)
-    )
+    historical_fraction = _validate_fraction("historical_fraction", tr.get("historical_fraction", 0.25))
     bot_fraction = _validate_fraction("bot_fraction", tr.get("bot_fraction", 0.25))
-    bot_v1_fraction = _validate_fraction(
-        "bot_v1_fraction", tr.get("bot_v1_fraction", 0.50)
-    )
+    bot_v1_fraction = _validate_fraction("bot_v1_fraction", tr.get("bot_v1_fraction", 0.50))
     if historical_fraction + bot_fraction > 1.0 + 1e-9:
         raise ValueError("historical_fraction + bot_fraction nie może przekroczyć 1")
 
-    historical_models_per_update = max(
-        0, int(tr.get("historical_models_per_update", 128))
-    )
-    historical_ram_cache_models = max(
-        0, int(tr.get("historical_ram_cache_models", 1024))
-    )
+    historical_models_per_update = max(0, int(tr.get("historical_models_per_update", 128)))
+    historical_ram_cache_models = max(0, int(tr.get("historical_ram_cache_models", 1024)))
     random_black_opening_fraction = _validate_fraction(
-        "random_black_opening_fraction",
-        tr.get("random_black_opening_fraction", 0.0),
+        "random_black_opening_fraction", tr.get("random_black_opening_fraction", 0.0)
     )
     symmetry_augmentation = bool(tr.get("symmetry_augmentation", False))
 
@@ -98,23 +82,26 @@ def train(config_path: str | Path) -> None:
     if not 0.0 < gamma <= 1.0:
         raise ValueError("gamma musi należeć do (0, 1]")
 
-    run_dir = Path(run_cfg.get("root_dir", "runs")) / str(
-        run_cfg.get("name", "connect6_v5")
-    )
+    run_dir = Path(run_cfg.get("root_dir", "runs")) / str(run_cfg.get("name", "connect6_v6"))
     checkpoint_mgr = CheckpointManager(run_dir / "checkpoints")
     logger = TrainingLogger(run_dir)
 
+    # Channels-last/NHWC gives cuDNN a tensor-core friendly memory layout for
+    # Conv2d on RTX 50. Keep model parameters in the same layout for both PPO and
+    # checkpointing; state_dict remains fully normal PyTorch tensors.
     model = build_model(model_cfg, board_size).to(device)
+    model = model.to(memory_format=torch.channels_last)
     base_lr = float(tr.get("learning_rate", 3e-4))
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=base_lr,
         weight_decay=float(tr.get("weight_decay", 1e-4)),
         eps=float(tr.get("adam_eps", 1e-5)),
+        fused=True,
     )
 
     use_amp = bool(tr.get("amp", True))
-    amp_dtype_name = str(tr.get("amp_dtype", "float16"))
+    amp_dtype_name = str(tr.get("amp_dtype", "bfloat16"))
     scaler_enabled = use_amp and amp_dtype_name.lower() == "float16"
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
@@ -130,9 +117,10 @@ def train(config_path: str | Path) -> None:
     if resume_path and resume_path.exists():
         payload = load_checkpoint(resume_path, map_location="cpu")
         cp_cfg = payload.get("model_config", {})
-        if int(cp_cfg.get("architecture_version", 0)) != 5:
-            raise RuntimeError("Resume przyjmuje wyłącznie checkpoint CNN V5")
+        if int(cp_cfg.get("architecture_version", 0)) != 6:
+            raise RuntimeError("Resume przyjmuje wyłącznie checkpoint CNN V6")
         model.load_state_dict(payload["model_state"])
+        model.to(memory_format=torch.channels_last)
         optimizer.load_state_dict(payload["optimizer_state"])
         if payload.get("scaler_state") and scaler_enabled:
             scaler.load_state_dict(payload["scaler_state"])
@@ -172,23 +160,18 @@ def train(config_path: str | Path) -> None:
     bot_games_total = 0
 
     print(f"[urządzenie] {device} | {torch.cuda.get_device_name(device)}")
+    print(f"[model] CNN V6 | GroupNorm layers=0,2,5,7 | channels_last=on")
+    print(f"[optimizer] fused AdamW | foreach gradient clipping")
     print(
-        f"[collector] native CUDA graph | envs={num_envs:,} | "
-        f"target={num_envs:,}*{completed_per_env:,}={completed_target:,} pełnych pozycji"
+        f"[collector] envs={num_envs:,} | target={num_envs:,}*{completed_per_env:,}="
+        f"{completed_target:,} pełnych pozycji"
     )
     print(
-        f"[mix] self={1-historical_fraction-bot_fraction:.0%} | "
-        f"history={historical_fraction:.0%} | bot={bot_fraction:.0%} "
-        f"(V1={bot_v1_fraction:.0%}, V2={1-bot_v1_fraction:.0%})"
+        f"[mix] self={1-historical_fraction-bot_fraction:.0%} | history={historical_fraction:.0%} | "
+        f"bot={bot_fraction:.0%} (V1={bot_v1_fraction:.0%}, V2={1-bot_v1_fraction:.0%})"
     )
-    print(
-        "[history] sampling with replacement: 50% all / 25% latest half / "
-        "25% latest quarter"
-    )
-    print(
-        "[buffer] PPO update boundary does not reset unfinished boards; "
-        "unfinished trajectory prefixes are discarded"
-    )
+    print("[history] sampling with replacement: 50% all / 25% latest half / 25% latest quarter")
+    print("[buffer] unfinished boards persist across PPO; unfinished trajectory prefixes are discarded")
     print(f"[run] {run_dir.resolve()}")
 
     try:
@@ -200,12 +183,8 @@ def train(config_path: str | Path) -> None:
                 group["lr"] = lr
 
             torch.cuda.reset_peak_memory_stats(device)
-
             requested_history_tables = int(round(num_envs * historical_fraction))
-            requested_models = min(
-                historical_models_per_update,
-                requested_history_tables,
-            )
+            requested_models = min(historical_models_per_update, requested_history_tables)
             hits_before = history_cache.hits
             misses_before = history_cache.misses
             history_load_started = time.perf_counter()
@@ -252,23 +231,18 @@ def train(config_path: str | Path) -> None:
             train_size = int(completed_idx.numel())
             if train_size != rollout.completed_positions:
                 raise RuntimeError(
-                    "Native collector accounting mismatch: "
+                    "Collector accounting mismatch: "
                     f"counter={rollout.completed_positions}, samples={train_size}"
                 )
             if train_size < completed_target:
-                raise RuntimeError(
-                    f"Native collector zatrzymał się za wcześnie: {train_size} < {completed_target}"
-                )
+                raise RuntimeError(f"Collector zatrzymał się za wcześnie: {train_size} < {completed_target}")
 
             generated_positions = rollout.generated_positions
             discarded_positions = generated_positions - train_size
             advantages = returns - buffer.values[completed_idx]
             if normalize_adv and advantages.numel() > 1:
-                advantages = (advantages - advantages.mean()) / (
-                    advantages.std(unbiased=False) + 1e-8
-                )
+                advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
-            # Packed inference tensors are no longer needed during PPO.
             del packed, historical
 
             ppo_started = time.perf_counter()
@@ -300,6 +274,7 @@ def train(config_path: str | Path) -> None:
                     mb_stones = buffer.stones_left[idx]
                     mb_actions = buffer.actions[idx].long()
                     mb_input = canonical_network_input(mb_boards, mb_players, mb_stones)
+                    mb_input = mb_input.contiguous(memory_format=torch.channels_last)
                     mb_legal = mb_boards.reshape(mb_boards.shape[0], -1).eq(0)
 
                     with _autocast_context(device, use_amp, amp_dtype_name):
@@ -308,19 +283,14 @@ def train(config_path: str | Path) -> None:
                         dist = Categorical(logits=logits.float())
                         new_logprob = dist.log_prob(mb_actions)
                         entropy = dist.entropy().mean()
-
                         old_logprob = buffer.logprobs[idx]
                         logratio = new_logprob - old_logprob
                         ratio = logratio.exp()
                         mb_adv = advantages[local_idx]
                         pg1 = -mb_adv * ratio
-                        pg2 = -mb_adv * torch.clamp(
-                            ratio, 1.0 - clip_coef, 1.0 + clip_coef
-                        )
+                        pg2 = -mb_adv * torch.clamp(ratio, 1.0 - clip_coef, 1.0 + clip_coef)
                         policy_loss = torch.maximum(pg1, pg2).mean()
-                        value_loss = 0.5 * (
-                            values.float() - returns[local_idx]
-                        ).pow(2).mean()
+                        value_loss = 0.5 * (values.float() - returns[local_idx]).pow(2).mean()
                         loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
 
                     with torch.no_grad():
@@ -335,11 +305,7 @@ def train(config_path: str | Path) -> None:
                     clipfracs.append(clipfrac)
                     kl_rolling_last = _mean(kls[-kl_window:])
                     hard_stop = target_kl > 0 and approx_kl > target_kl * kl_hard_multiplier
-                    soft_stop = (
-                        target_kl > 0
-                        and len(kls) >= kl_window
-                        and kl_rolling_last > target_kl
-                    )
+                    soft_stop = target_kl > 0 and len(kls) >= kl_window and kl_rolling_last > target_kl
                     if hard_stop or soft_stop:
                         stop_for_kl = True
                         kl_stop_kind = "hard" if hard_stop else "rolling"
@@ -355,12 +321,16 @@ def train(config_path: str | Path) -> None:
                     else:
                         loss.backward()
 
+                    # foreach=True batches norm/scale work across parameter tensors
+                    # instead of issuing many tiny pointwise CUDA operations.
                     grad_norm = nn.utils.clip_grad_norm_(
-                        model.parameters(), max_grad_norm, error_if_nonfinite=True
+                        model.parameters(),
+                        max_grad_norm,
+                        error_if_nonfinite=True,
+                        foreach=True,
                     ).detach().float()
                     grad_scale = torch.clamp(
-                        torch.as_tensor(max_grad_norm, device=device) / (grad_norm + 1e-6),
-                        max=1.0,
+                        torch.as_tensor(max_grad_norm, device=device) / (grad_norm + 1e-6), max=1.0
                     )
                     slot = completed
                     grad_norm_values[slot] = grad_norm
@@ -526,7 +496,7 @@ def train(config_path: str | Path) -> None:
                 f"bots={assignments.bot_v1_tables}+{assignments.bot_v2_tables} "
                 f"V1={metrics['bot_v1_win_rate']:.1%} V2={metrics['bot_v2_win_rate']:.1%} "
                 f"collect={metrics['selfplay_positions_per_second']:,.0f} pos/s "
-                f"VRAM={gpu_allocated_gb:.2f}/{gpu_reserved_gb:.2f}GB"
+                f"PPO={ppo_elapsed:.1f}s VRAM={gpu_allocated_gb:.2f}/{gpu_reserved_gb:.2f}GB"
             )
 
             if update % checkpoint_every == 0:
@@ -570,9 +540,7 @@ def train(config_path: str | Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Connect6 CNN V5 PPO with GPU-native CUDA Graph rollout"
-    )
+    parser = argparse.ArgumentParser(description="Connect6 CNN V6 PPO with optimized GPU rollout")
     parser.add_argument("--config", default="configs/train.yaml")
     args = parser.parse_args()
     train(args.config)
