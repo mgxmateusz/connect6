@@ -1,9 +1,9 @@
 # =============================================================================
-# KONFIGURACJA TRENINGU CONNECT6 - CNN V6
+# KONFIGURACJA TRENINGU CONNECT6 - CNN V6 DENSE
 # =============================================================================
 
 run:
-  name: "connect6_cnn_03"
+  name: "connect6_cnn_05"
   root_dir: "runs"
   seed: 42
   resume: "auto"
@@ -16,22 +16,16 @@ game:
 model:
   architecture_version: 6
 
-  # Backbone 19x19. GroupNorm tylko po warstwach 0, 2, 5 i 7,
-  # zamiast po wszystkich ośmiu convach. Aktywne GN nadal mają 8 kanałów/grupę.
+  # Dense backbone 19x19. GroupNorm tylko po warstwach 0, 2, 5 i 7.
   kernels: [23, 3, 3, 3, 3, 3, 3, 3]
   channels: [32, 32, 64, 64, 64, 96, 96, 96]
 
-  # Wejście [B,4,19,19]: moje, przeciwnika, maska planszy, ostatni kamień tury.
-  # POLICY: Conv 1x1, 96 -> 1 -> 361 logitów.
-  # VALUE:  Conv 1x1, 96 -> 1 -> global mean -> tanh.
   compile: false
   compile_mode: "default"
 
 training:
   device: "cuda"
   num_envs: 2048
-
-  # Target pełnych pozycji na update = num_envs * completed_positions_per_update.
   completed_positions_per_update: 384
   updates: 10000000
 
@@ -50,13 +44,15 @@ training:
   target_kl: 0.05
   kl_window: 32
   kl_hard_multiplier: 3
+  # KL/clipfrac nadal liczone dla każdego minibatcha na GPU, ale CPU odbiera je
+  # pakietami zamiast wymuszać synchronizację po każdym minibatchu.
+  kl_sync_interval: 32
   normalize_advantage: true
   gamma: 0.98
 
   symmetry_augmentation: true
   random_black_opening_fraction: 0.50
 
-  # 50% current/self-play, 25% history, 25% GPU tactical bot.
   historical_fraction: 0.25
   bot_fraction: 0.25
   bot_v1_fraction: 0.50
@@ -70,7 +66,6 @@ training:
   temperature_end: 1.00
   temperature_decay_updates: 5000
 
-  # BF16: duży zakres wykładnika, brak GradScalera i dobra ścieżka tensor-core.
   amp: true
   amp_dtype: "bfloat16"
 
