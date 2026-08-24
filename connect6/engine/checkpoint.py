@@ -84,9 +84,9 @@ def load_model_for_inference(
     payload = load_checkpoint(path, map_location="cpu")
     game_cfg = payload["game_config"]
     model_cfg = payload["model_config"]
-    if int(model_cfg.get("architecture_version", 0)) != 4:
+    if int(model_cfg.get("architecture_version", 0)) != 5:
         raise RuntimeError(
-            f"Checkpoint {path} nie używa aktualnej architektury CNN v4."
+            f"Checkpoint {path} nie używa aktualnej architektury CNN v5."
         )
     model = build_model(model_cfg, int(game_cfg["board_size"]))
     model.load_state_dict(payload["model_state"])
