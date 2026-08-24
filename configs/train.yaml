@@ -51,7 +51,6 @@ training:
   # PPO / CREDIT ASSIGNMENT
   # --------------------------------------------------------------------------
   ppo_epochs: 3
-
   minibatch_size: 1024
 
   learning_rate: 0.0002
@@ -66,9 +65,7 @@ training:
   target_kl: 0.05
   kl_window: 32
   kl_hard_multiplier: 3
-
   normalize_advantage: true
-
   gamma: 0.98
 
   # D4 nadal ma sens dla zwykłego CNN: konwolucja daje ekwiwariancję na
@@ -93,13 +90,18 @@ training:
   # 50% z całej historii, 25% z ostatniej połowy, 25% z ostatniej ćwiartki.
   historical_models_per_update: 128
   historical_ram_cache_models: 1024
-  historical_inference_dtype: "bfloat16"   # bfloat16 | float16 | float32
+
+  # --------------------------------------------------------------------------
+  # GPU-NATIVE ROLLOUT
+  # --------------------------------------------------------------------------
+  # Collector pakuje current+history do FP16 WMMA i wykonuje cały move loop
+  # wewnątrz CUDA Graph conditional while. Python wraca dopiero po gotowym buforze.
+  native_compile_verbose: false
 
   # --------------------------------------------------------------------------
   # CUDA MEMORY CACHE
   # --------------------------------------------------------------------------
-  # Okresowe czyszczenie wyłączone. run_train.py czyści cache dopiero po
-  # osiągnięciu 10 GB przez torch.cuda.memory_reserved().
+  # run_train.py czyści cache dopiero po osiągnięciu 10 GB reserved VRAM.
   cuda_cache_clear_every_percent: 0.0
 
   # --------------------------------------------------------------------------
@@ -109,8 +111,10 @@ training:
   temperature_end: 1.00
   temperature_decay_updates: 5000
 
+  # FP16 odpowiada precyzji natywnego collectora, dzięki czemu old_logprob z
+  # rolloutu i pierwszy forward PPO nie różnią się tylko przez BF16 vs FP16.
   amp: true
-  amp_dtype: "bfloat16"     # bfloat16 | float16
+  amp_dtype: "float16"       # float16 | bfloat16
 
   checkpoint_every_updates: 1
   dashboard_every_updates: 1
