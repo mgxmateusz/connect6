@@ -30,16 +30,16 @@ training:
   updates: 10000000
 
   ppo_epochs: 2
-  minibatch_size: 512
+  minibatch_size: 1024
 
-  learning_rate: 0.0003
+  learning_rate: 0.00015
   lr_schedule: "cosine"
   weight_decay: 0.0001
   adam_eps: 0.00001
   clip_coef: 0.2
   value_coef: 0.50
   entropy_coef: 0.0125
-  max_grad_norm: 2.0
+  max_grad_norm: 3.0
 
   target_kl: 0.05
   kl_window: 32
