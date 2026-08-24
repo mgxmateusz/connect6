@@ -29,7 +29,7 @@ training:
   completed_positions_per_update: 378
   updates: 10000000
 
-  ppo_epochs: 3
+  ppo_epochs: 2
   minibatch_size: 512
 
   learning_rate: 0.0003
