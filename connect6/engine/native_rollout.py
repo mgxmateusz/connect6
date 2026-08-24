@@ -9,7 +9,12 @@ from torch.distributions import Categorical
 from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2
 
 from .model import mask_logits
-from .native_rollout_state import NativeRolloutBuffer, NativeRolloutState, PackedRolloutModels
+from .native_rollout_state import (
+    NORM_LAYERS,
+    NativeRolloutBuffer,
+    NativeRolloutState,
+    PackedRolloutModels,
+)
 from .vector_env import VectorConnect6, canonical_network_input
 
 
@@ -87,7 +92,6 @@ def build_rollout_assignments(
     bot_fraction: float,
     bot_v1_fraction: float = 0.5,
 ) -> RolloutAssignments:
-    """Assign fixed self/history/bot tables for one PPO update."""
     n = int(num_envs)
     historical_fraction = float(historical_fraction)
     bot_fraction = float(bot_fraction)
@@ -109,7 +113,6 @@ def build_rollout_assignments(
     permutation = torch.randperm(n, device=device)
     history_slots = permutation[:history_count]
     bot_slots = permutation[history_count : history_count + bot_count]
-
     table_kind = torch.zeros(n, dtype=torch.uint8, device=device)
     opponent_model = torch.full((n,), -1, dtype=torch.int32, device=device)
     current_color = torch.ones(n, dtype=torch.int8, device=device)
@@ -117,8 +120,7 @@ def build_rollout_assignments(
 
     if history_count:
         table_kind[history_slots] = TABLE_HISTORY
-        ids = torch.arange(history_count, dtype=torch.int32, device=device)
-        ids = ids.remainder(int(historical_model_count))
+        ids = torch.arange(history_count, dtype=torch.int32, device=device).remainder(int(historical_model_count))
         if history_count > 1:
             ids = ids[torch.randperm(history_count, device=device)]
         opponent_model[history_slots] = ids + 1
@@ -159,9 +161,7 @@ def _transform_boards(boards: torch.Tensor, k: int, flip: bool) -> torch.Tensor:
     return torch.flip(out, dims=(-1,)) if flip else out
 
 
-def _inverse_transform_actions(
-    actions: torch.Tensor, board_size: int, k: int, flip: bool
-) -> torch.Tensor:
+def _inverse_transform_actions(actions: torch.Tensor, board_size: int, k: int, flip: bool) -> torch.Tensor:
     n = int(board_size)
     r = torch.div(actions, n, rounding_mode="floor")
     c = actions.remainder(n)
@@ -176,12 +176,8 @@ def _inverse_transform_actions(
     return r * n + c
 
 
-def _forced_random_opening_mask(
-    move_count: torch.Tensor,
-    current_player: torch.Tensor,
-    stones_left: torch.Tensor,
-    fraction: float,
-) -> torch.Tensor:
+def _forced_random_opening_mask(move_count: torch.Tensor, current_player: torch.Tensor,
+                                stones_left: torch.Tensor, fraction: float) -> torch.Tensor:
     fresh_black = move_count.eq(0) & current_player.eq(1) & stones_left.eq(1)
     fraction = float(fraction)
     if fraction <= 0.0:
@@ -191,25 +187,19 @@ def _forced_random_opening_mask(
     return fresh_black & torch.rand(move_count.shape, device=move_count.device).lt(fraction)
 
 
-def _sample_actions(
-    logits: torch.Tensor, legal: torch.Tensor, temperature: float
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _sample_actions(logits: torch.Tensor, legal: torch.Tensor, temperature: float) -> tuple[torch.Tensor, torch.Tensor]:
     logits = mask_logits(logits.float(), legal) / max(float(temperature), 1e-4)
     dist = Categorical(logits=logits)
     actions = dist.sample()
     return actions, dist.log_prob(actions)
 
 
-def _sample_actions_only(
-    logits: torch.Tensor, legal: torch.Tensor, temperature: float
-) -> torch.Tensor:
+def _sample_actions_only(logits: torch.Tensor, legal: torch.Tensor, temperature: float) -> torch.Tensor:
     logits = mask_logits(logits.float(), legal) / max(float(temperature), 1e-4)
     return Categorical(logits=logits).sample()
 
 
-def _conv_weight(
-    packed: PackedRolloutModels, layer: int, model_slice: slice | int
-) -> torch.Tensor:
+def _conv_weight(packed: PackedRolloutModels, layer: int, model_slice: slice | int) -> torch.Tensor:
     kernel = _KERNELS[layer]
     cin = _IN_CHANNELS[layer]
     cout = _CHANNELS[layer]
@@ -220,11 +210,13 @@ def _conv_weight(
     return raw.reshape(raw.shape[0], cout, cin, kernel, kernel)
 
 
-def _prepare_current_weights(
-    packed: PackedRolloutModels,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-    """Create stable fixed-shape views once, so cuDNN sees one shape every step."""
-    conv = [_conv_weight(packed, i, 0).contiguous() for i in range(len(_KERNELS))]
+def _prepare_current_weights(packed: PackedRolloutModels) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    # NHWC/channels_last lets cuDNN choose tensor-core friendly kernels for the
+    # fixed 2048-table current-policy batch.
+    conv = [
+        _conv_weight(packed, i, 0).contiguous(memory_format=torch.channels_last)
+        for i in range(len(_KERNELS))
+    ]
     norm_w = [packed.norm_weights[i][0].contiguous() for i in range(len(_KERNELS))]
     norm_b = [packed.norm_biases[i][0].contiguous() for i in range(len(_KERNELS))]
     return conv, norm_w, norm_b
@@ -237,57 +229,45 @@ def _forward_current_fixed(
     norm_biases: list[torch.Tensor],
     packed: PackedRolloutModels,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fixed full-env forward. No dynamic compaction => no CUDA sync/autotune churn."""
-    x = x.to(dtype=torch.float16)
+    x = x.to(dtype=torch.float16).contiguous(memory_format=torch.channels_last)
     for layer, (kernel, channels) in enumerate(zip(_KERNELS, _CHANNELS)):
         x = F.conv2d(x, conv_weights[layer], bias=None, stride=1, padding=kernel // 2)
-        x = F.group_norm(
-            x,
-            num_groups=channels // _GROUP_CHANNELS,
-            weight=norm_weights[layer],
-            bias=norm_biases[layer],
-            eps=1e-5,
-        )
+        if layer in NORM_LAYERS:
+            x = F.group_norm(
+                x,
+                num_groups=channels // _GROUP_CHANNELS,
+                weight=norm_weights[layer],
+                bias=norm_biases[layer],
+                eps=1e-5,
+            )
         x = F.silu(x)
 
     policy = F.conv2d(
         x,
-        packed.policy_weight[0].reshape(1, 96, 1, 1),
+        packed.policy_weight[0].reshape(1, 96, 1, 1).contiguous(memory_format=torch.channels_last),
         packed.policy_bias[0].reshape(1),
     ).flatten(1)
     value_map = F.conv2d(
         x,
-        packed.value_weight[0].reshape(1, 96, 1, 1),
+        packed.value_weight[0].reshape(1, 96, 1, 1).contiguous(memory_format=torch.channels_last),
         packed.value_bias[0].reshape(1),
     )
     values = torch.tanh(value_map.mean(dim=(-2, -1)).squeeze(1))
     return policy, values
 
 
-def _build_history_layout(
-    assignments: RolloutAssignments, historical_models: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build fixed [models,tables] history layout once, outside the hot loop."""
+def _build_history_layout(assignments: RolloutAssignments, historical_models: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     device = assignments.table_kind.device
     if historical_models <= 0 or assignments.history_tables <= 0:
         empty = torch.empty((0, 0), dtype=torch.long, device=device)
-        return (
-            empty,
-            torch.empty((0, 0), dtype=torch.bool, device=device),
-            torch.empty(0, dtype=torch.long, device=device),
-            torch.empty(0, dtype=torch.long, device=device),
-        )
-
+        return empty, torch.empty((0, 0), dtype=torch.bool, device=device), torch.empty(0, dtype=torch.long, device=device), torch.empty(0, dtype=torch.long, device=device)
     history_mask = assignments.table_kind.eq(TABLE_HISTORY)
     groups: list[torch.Tensor] = []
     for model_id in range(historical_models):
-        group = torch.nonzero(
-            history_mask & assignments.opponent_model.eq(model_id + 1), as_tuple=False
-        ).flatten()
+        group = torch.nonzero(history_mask & assignments.opponent_model.eq(model_id + 1), as_tuple=False).flatten()
         if group.numel() == 0:
             raise RuntimeError(f"History model {model_id} nie ma przypisanego stołu")
         groups.append(group)
-
     max_tables = max(int(g.numel()) for g in groups)
     matrix = torch.empty((historical_models, max_tables), dtype=torch.long, device=device)
     valid = torch.zeros((historical_models, max_tables), dtype=torch.bool, device=device)
@@ -297,47 +277,32 @@ def _build_history_layout(
         valid[model_id, :count] = True
         if count < max_tables:
             matrix[model_id, count:] = group[0]
-
     valid_positions = torch.nonzero(valid.reshape(-1), as_tuple=False).flatten()
     flat_tables = matrix.reshape(-1)[valid_positions]
     return matrix, valid, valid_positions, flat_tables
 
 
-def _forward_history_grouped(
-    packed: PackedRolloutModels, x: torch.Tensor
-) -> torch.Tensor:
-    """Frozen historical policy forward using fixed grouped CUDA convolutions."""
+def _forward_history_grouped(packed: PackedRolloutModels, x: torch.Tensor) -> torch.Tensor:
     models, tables, _, height, width = x.shape
     x = x.to(dtype=torch.float16)
-    for layer, (kernel, channels, cin) in enumerate(
-        zip(_KERNELS, _CHANNELS, _IN_CHANNELS)
-    ):
+    for layer, (kernel, channels, cin) in enumerate(zip(_KERNELS, _CHANNELS, _IN_CHANNELS)):
         grouped_x = x.permute(1, 0, 2, 3, 4).reshape(tables, models * cin, height, width)
-        weight = _conv_weight(packed, layer, slice(1, 1 + models)).reshape(
-            models * channels, cin, kernel, kernel
-        )
-        y = F.conv2d(
-            grouped_x,
-            weight,
-            bias=None,
-            stride=1,
-            padding=kernel // 2,
-            groups=models,
-        )
+        weight = _conv_weight(packed, layer, slice(1, 1 + models)).reshape(models * channels, cin, kernel, kernel)
+        y = F.conv2d(grouped_x, weight, bias=None, stride=1, padding=kernel // 2, groups=models)
         x = y.reshape(tables, models, channels, height, width).permute(1, 0, 2, 3, 4)
-        x = F.group_norm(
-            x.reshape(models * tables, channels, height, width),
-            num_groups=channels // _GROUP_CHANNELS,
-            weight=None,
-            bias=None,
-            eps=1e-5,
-        ).reshape(models, tables, channels, height, width)
-        x = (
-            x * packed.norm_weights[layer][1 : 1 + models, None, :, None, None]
-            + packed.norm_biases[layer][1 : 1 + models, None, :, None, None]
-        )
+        if layer in NORM_LAYERS:
+            x = F.group_norm(
+                x.reshape(models * tables, channels, height, width),
+                num_groups=channels // _GROUP_CHANNELS,
+                weight=None,
+                bias=None,
+                eps=1e-5,
+            ).reshape(models, tables, channels, height, width)
+            x = (
+                x * packed.norm_weights[layer][1 : 1 + models, None, :, None, None]
+                + packed.norm_biases[layer][1 : 1 + models, None, :, None, None]
+            )
         x = F.silu(x)
-
     grouped_x = x.permute(1, 0, 2, 3, 4).reshape(tables, models * 96, height, width)
     policy_weight = packed.policy_weight[1 : 1 + models].reshape(models, 96, 1, 1)
     policy_bias = packed.policy_bias[1 : 1 + models]
@@ -346,26 +311,7 @@ def _forward_history_grouped(
 
 
 class NativeRolloutCollector:
-    """GPU-resident hybrid collector with a fixed-shape cuDNN hot path.
-
-    The previous hybrid implementation accidentally synchronized CUDA several
-    times per move (`torch.nonzero`, bool(cuda_tensor), terminal .cpu()) and fed
-    cuDNN a different current-policy batch size almost every step. With
-    `cudnn.benchmark=True` that caused algorithm-search churn and left the GPU
-    mostly idle. This version intentionally evaluates current policy on all envs,
-    writes fixed env-sized slabs, keeps terminal accounting on GPU and performs
-    only one unavoidable scalar sync per step to preserve the exact first step
-    at which the completed-position target is crossed.
-    """
-
-    def __init__(
-        self,
-        num_envs: int,
-        target_completed_positions: int,
-        device: torch.device,
-        *,
-        verbose_build: bool = False,
-    ) -> None:
+    def __init__(self, num_envs: int, target_completed_positions: int, device: torch.device, *, verbose_build: bool = False) -> None:
         if device.type != "cuda":
             raise ValueError("NativeRolloutCollector wymaga CUDA")
         self.device = device
@@ -383,12 +329,7 @@ class NativeRolloutCollector:
         self.env.stones_left = self.state.stones_left
         self.env.empty_count = self.state.empty_count
         self.env.move_count = self.state.move_count
-
-        self.buffer = NativeRolloutBuffer(
-            target_completed_positions=target_completed_positions,
-            envs=self.num_envs,
-            device=device,
-        )
+        self.buffer = NativeRolloutBuffer(target_completed_positions=target_completed_positions, envs=self.num_envs, device=device)
         self.verbose_build = bool(verbose_build)
         self.symmetry_phase = 0
         self.bot_v1 = GPUTacticalBot(device, verbose_build=verbose_build)
@@ -402,15 +343,11 @@ class NativeRolloutCollector:
         return None
 
     def _compact_slabs(self, valid: torch.Tensor, slab_count: int) -> int:
-        """Compact current-policy rows once after rollout instead of every move."""
         valid_idx = torch.nonzero(valid[:slab_count], as_tuple=False).flatten()
         count = int(valid_idx.numel())
         if count == 0:
             self.buffer.count = 0
             return 0
-
-        # Advanced indexing creates temporary GPU tensors, so overlapping source
-        # and destination ranges are safe during the one-off compaction.
         self.buffer.boards[:count].copy_(self.buffer.boards[valid_idx])
         self.buffer.players[:count].copy_(self.buffer.players[valid_idx])
         self.buffer.stones_left[:count].copy_(self.buffer.stones_left[valid_idx])
@@ -441,33 +378,16 @@ class NativeRolloutCollector:
         self.buffer.count = 0
         self.buffer.episode_results.fill_(_UNKNOWN_EPISODE_RESULT)
         self.buffer.episode_terminal_moves.fill_(_UNKNOWN_TERMINAL_MOVE)
-
-        current_episode_ids = torch.arange(
-            self.num_envs, dtype=torch.int32, device=self.device
-        )
-        segment_positions = torch.zeros(
-            self.num_envs, dtype=torch.int32, device=self.device
-        )
-        next_episode_id = torch.tensor(
-            self.num_envs, dtype=torch.int64, device=self.device
-        )
+        current_episode_ids = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
+        segment_positions = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        next_episode_id = torch.tensor(self.num_envs, dtype=torch.int64, device=self.device)
         current_color = assignments.current_color.clone()
 
         historical_models = max(0, packed.num_models - 1)
-        history_matrix, history_valid, history_valid_positions, history_flat_tables = (
-            _build_history_layout(assignments, historical_models)
-        )
+        history_matrix, history_valid, history_valid_positions, history_flat_tables = _build_history_layout(assignments, historical_models)
         history_tables = int(assignments.history_tables)
-
-        # Fixed bot subsets are built once. Their nonzero calls are outside the hot loop.
-        v1_slots = torch.nonzero(
-            assignments.table_kind.eq(TABLE_BOT) & assignments.bot_version.eq(1),
-            as_tuple=False,
-        ).flatten()
-        v2_slots = torch.nonzero(
-            assignments.table_kind.eq(TABLE_BOT) & assignments.bot_version.eq(2),
-            as_tuple=False,
-        ).flatten()
+        v1_slots = torch.nonzero(assignments.table_kind.eq(TABLE_BOT) & assignments.bot_version.eq(1), as_tuple=False).flatten()
+        v2_slots = torch.nonzero(assignments.table_kind.eq(TABLE_BOT) & assignments.bot_version.eq(2), as_tuple=False).flatten()
 
         current_conv, current_norm_w, current_norm_b = _prepare_current_weights(packed)
         slab_valid = torch.empty(self.buffer.capacity, dtype=torch.bool, device=self.device)
@@ -481,7 +401,6 @@ class NativeRolloutCollector:
         bot_v1_kind = bot_kind & assignments.bot_version.eq(1)
         bot_v2_kind = bot_kind & assignments.bot_version.eq(2)
         opponent_kind = history_kind | bot_kind
-
         torch.cuda.manual_seed(int(seed) & 0x7FFFFFFF)
 
         while True:
@@ -500,40 +419,21 @@ class NativeRolloutCollector:
                 k, flip = 0, False
                 view_boards = self.env.boards
 
-            network_input = canonical_network_input(
-                view_boards, self.env.current_player, self.env.stones_left
-            )
+            network_input = canonical_network_input(view_boards, self.env.current_player, self.env.stones_left)
             legal = view_boards.reshape(self.num_envs, -1).eq(0)
             forced_opening = _forced_random_opening_mask(
-                self.env.move_count,
-                self.env.current_player,
-                self.env.stones_left,
-                random_black_opening_fraction,
+                self.env.move_count, self.env.current_player, self.env.stones_left, random_black_opening_fraction
             )
-
             versus_current = kind.eq(TABLE_SELF) | self.env.current_player.eq(current_color)
             current_actor = versus_current & ~forced_opening
             bot_actor = bot_kind & self.env.current_player.ne(current_color) & ~forced_opening
 
-            # Crucial performance choice: always use the same [num_envs,4,19,19]
-            # current-policy batch. Dynamic torch.nonzero batches synchronized the
-            # host and caused cuDNN benchmark/autotune to see hundreds of shapes.
             current_logits, current_values = _forward_current_fixed(
-                network_input,
-                current_conv,
-                current_norm_w,
-                current_norm_b,
-                packed,
+                network_input, current_conv, current_norm_w, current_norm_b, packed
             )
-            current_actions_view, current_logprobs = _sample_actions(
-                current_logits, legal, temperature
-            )
-            if symmetry_augmentation:
-                env_actions = _inverse_transform_actions(current_actions_view, 19, k, flip)
-            else:
-                env_actions = current_actions_view.clone()
+            current_actions_view, current_logprobs = _sample_actions(current_logits, legal, temperature)
+            env_actions = _inverse_transform_actions(current_actions_view, 19, k, flip) if symmetry_augmentation else current_actions_view.clone()
 
-            # Fixed slab write: no dynamic current_idx, no per-step compaction.
             self.buffer.boards[slab_start:slab_end].copy_(view_boards)
             self.buffer.players[slab_start:slab_end].copy_(self.env.current_player)
             self.buffer.stones_left[slab_start:slab_end].copy_(self.env.stones_left)
@@ -549,9 +449,7 @@ class NativeRolloutCollector:
                 grouped_input = network_input[history_matrix]
                 grouped_legal = legal[history_matrix]
                 grouped_logits = _forward_history_grouped(packed, grouped_input)
-                grouped_actions_view = _sample_actions_only(
-                    grouped_logits, grouped_legal, temperature
-                )
+                grouped_actions_view = _sample_actions_only(grouped_logits, grouped_legal, temperature)
                 grouped_players = self.env.current_player[history_matrix]
                 grouped_colors = current_color[history_matrix]
                 grouped_forced = forced_opening[history_matrix]
@@ -560,35 +458,21 @@ class NativeRolloutCollector:
                 valid_actions = grouped_actions_view.reshape(-1)[history_valid_positions]
                 if symmetry_augmentation:
                     valid_actions = _inverse_transform_actions(valid_actions, 19, k, flip)
-                env_actions[history_flat_tables] = torch.where(
-                    valid_old_turn, valid_actions, env_actions[history_flat_tables]
-                )
+                env_actions[history_flat_tables] = torch.where(valid_old_turn, valid_actions, env_actions[history_flat_tables])
 
-            # Fixed bot batches; no dynamic selection inside the loop.
             if v1_slots.numel():
                 v1_actions = self.bot_v1.actions(
-                    self.env.boards[v1_slots],
-                    self.env.current_player[v1_slots],
-                    self.env.stones_left[v1_slots],
+                    self.env.boards[v1_slots], self.env.current_player[v1_slots], self.env.stones_left[v1_slots]
                 ).long()
-                env_actions[v1_slots] = torch.where(
-                    bot_actor[v1_slots], v1_actions, env_actions[v1_slots]
-                )
+                env_actions[v1_slots] = torch.where(bot_actor[v1_slots], v1_actions, env_actions[v1_slots])
             if v2_slots.numel():
                 v2_actions = self.bot_v2.actions(
-                    self.env.boards[v2_slots],
-                    self.env.current_player[v2_slots],
-                    self.env.stones_left[v2_slots],
+                    self.env.boards[v2_slots], self.env.current_player[v2_slots], self.env.stones_left[v2_slots]
                 ).long()
-                env_actions[v2_slots] = torch.where(
-                    bot_actor[v2_slots], v2_actions, env_actions[v2_slots]
-                )
+                env_actions[v2_slots] = torch.where(bot_actor[v2_slots], v2_actions, env_actions[v2_slots])
 
-            # Always execute the fixed-size random generation. bool(cuda_tensor)
-            # used here previously forced a full device synchronization every step.
             random_actions = torch.randint(0, 19 * 19, (self.num_envs,), device=self.device)
             env_actions = torch.where(forced_opening, random_actions, env_actions)
-
             step = self.env.step(env_actions)
             self.state.rng_counter.add_(1)
             steps += 1
@@ -607,23 +491,13 @@ class NativeRolloutCollector:
             done_bot_v1 = done & bot_v1_kind
             done_bot_v2 = done & bot_v2_kind
 
-            # Episode result writes stay fixed-size and entirely on-device.
             episode_slots = current_episode_ids.long()
             old_results = self.buffer.episode_results[episode_slots]
             old_terminal = self.buffer.episode_terminal_moves[episode_slots]
-            self.buffer.episode_results[episode_slots] = torch.where(
-                done, winners, old_results
-            )
-            self.buffer.episode_terminal_moves[episode_slots] = torch.where(
-                done, step.game_lengths.to(torch.int16), old_terminal
-            )
+            self.buffer.episode_results[episode_slots] = torch.where(done, winners, old_results)
+            self.buffer.episode_terminal_moves[episode_slots] = torch.where(done, step.game_lengths.to(torch.int16), old_terminal)
+            completed_gpu.add_((segment_positions.to(torch.int64) * done_i64).sum())
 
-            completed_add = (segment_positions.to(torch.int64) * done_i64).sum()
-            completed_gpu.add_(completed_add)
-
-            # Aggregate all reporting counters on GPU; transfer only once at end.
-            # The extra V1/V2 counters add only a few tiny 2048-element reductions
-            # and introduce no extra CPU-GPU synchronization.
             stats_gpu[0].add_(done_i64.sum())
             stats_gpu[1].add_((done & winners.eq(1)).sum())
             stats_gpu[2].add_((done & winners.eq(-1)).sum())
@@ -646,26 +520,19 @@ class NativeRolloutCollector:
             stats_gpu[19].add_((done_bot_v2 & current_loss).sum())
             stats_gpu[20].add_((done_bot_v2 & draw).sum())
 
-            # Reset completed boards without torch.nonzero / dynamic indices.
             self.env.boards.masked_fill_(done[:, None, None], 0)
             self.env.current_player.masked_fill_(done, 1)
             self.env.stones_left.masked_fill_(done, 1)
             self.env.empty_count.masked_fill_(done, 19 * 19)
             self.env.move_count.masked_fill_(done, 0)
             segment_positions.masked_fill_(done, 0)
-
             flip_color = done & opponent_kind
             current_color.copy_(torch.where(flip_color, -current_color, current_color))
 
-            # Allocate fresh episode ids with a fixed-size prefix sum, still GPU-only.
             done_rank = done.to(torch.int32).cumsum(0)
             new_ids = (next_episode_id + done_rank.to(torch.int64) - 1).to(torch.int32)
             current_episode_ids.copy_(torch.where(done, new_ids, current_episode_ids))
             next_episode_id.add_(done_rank[-1].to(torch.int64))
-
-            # One scalar sync remains intentionally: the user requested stopping at
-            # the exact first rollout step X that reaches the target, while keeping
-            # every game that also terminates in that same step X.
             if int(completed_gpu.item()) >= self.buffer.target_completed_positions:
                 break
 
@@ -676,8 +543,7 @@ class NativeRolloutCollector:
         next_episode = int(next_episode_id.item())
         if next_episode > self.buffer.episode_capacity:
             raise RuntimeError(
-                f"episode result buffer capacity exceeded: {next_episode:,} > "
-                f"{self.buffer.episode_capacity:,}"
+                f"episode result buffer capacity exceeded: {next_episode:,} > {self.buffer.episode_capacity:,}"
             )
 
         torch.cuda.synchronize(self.device)
