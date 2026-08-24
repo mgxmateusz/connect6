@@ -15,15 +15,18 @@ class PolicyValueNet(nn.Module):
       2 = maska prawdziwej planszy (1 na planszy, 0 w paddingu),
       3 = czy aktualna decyzja jest ostatnim kamieniem w turze.
 
-    Backbone zachowuje rozdzielczość planszy przez cały model. Każdy blok ma
-    postać Conv -> GroupNorm -> SiLU. GroupNorm zawsze używa dokładnie ośmiu
-    kanałów na grupę, dzięki czemu normalizacja nie zależy od wielkości batcha.
+    Backbone zachowuje rozdzielczość planszy przez cały model. Dla wydajności
+    GroupNorm nie jest już wykonywany po każdym convie. Normalizujemy po
+    warstwach 0, 2, 5 i 7: po wejściu do każdego nowego poziomu szerokości
+    (32/64/96 kanałów) oraz na końcu backbone. Każdy aktywny GroupNorm ma
+    dokładnie osiem kanałów na grupę.
     """
 
     DEFAULT_KERNELS = (23, 3, 3, 3, 3, 3, 3, 3)
     DEFAULT_CHANNELS = (32, 32, 64, 64, 64, 96, 96, 96)
     INPUT_CHANNELS = 4
     CHANNELS_PER_GROUP = 8
+    NORM_LAYERS = (0, 2, 5, 7)
 
     def __init__(
         self,
@@ -47,20 +50,20 @@ class PolicyValueNet(nn.Module):
             raise ValueError("Każdy kernel musi być dodatnią liczbą nieparzystą")
         if any(c <= 0 for c in channels):
             raise ValueError("Liczba kanałów musi być większa od zera")
-        if any(c % self.CHANNELS_PER_GROUP != 0 for c in channels):
+        if any(channels[i] % self.CHANNELS_PER_GROUP != 0 for i in self.NORM_LAYERS if i < len(channels)):
             raise ValueError(
-                f"Każda warstwa musi mieć liczbę kanałów podzielną przez "
-                f"{self.CHANNELS_PER_GROUP}, aby GroupNorm miał zawsze "
-                f"{self.CHANNELS_PER_GROUP} kanałów na grupę"
+                f"Warstwy z GroupNorm muszą mieć liczbę kanałów podzielną przez "
+                f"{self.CHANNELS_PER_GROUP}"
             )
 
         self.kernels = kernels
         self.channels = channels
+        self.norm_layers = tuple(i for i in self.NORM_LAYERS if i < len(channels))
 
         convs: list[nn.Conv2d] = []
-        norms: list[nn.GroupNorm] = []
+        norms: list[nn.Module] = []
         in_channels = self.input_channels
-        for kernel, out_channels in zip(kernels, channels):
+        for layer, (kernel, out_channels) in enumerate(zip(kernels, channels)):
             convs.append(
                 nn.Conv2d(
                     in_channels,
@@ -71,23 +74,22 @@ class PolicyValueNet(nn.Module):
                     bias=False,
                 )
             )
-            norms.append(
-                nn.GroupNorm(
-                    num_groups=out_channels // self.CHANNELS_PER_GROUP,
-                    num_channels=out_channels,
-                    affine=True,
+            if layer in self.norm_layers:
+                norms.append(
+                    nn.GroupNorm(
+                        num_groups=out_channels // self.CHANNELS_PER_GROUP,
+                        num_channels=out_channels,
+                        affine=True,
+                    )
                 )
-            )
+            else:
+                norms.append(nn.Identity())
             in_channels = out_channels
         self.convs = nn.ModuleList(convs)
         self.norms = nn.ModuleList(norms)
         self.activation = nn.SiLU(inplace=True)
 
-        # POLICY: jedna mapa logitów 19x19, następnie flatten -> 361 akcji.
         self.policy_output = nn.Conv2d(in_channels, 1, kernel_size=1, bias=True)
-
-        # VALUE pozostaje w pełni konwolucyjne. Mapa 1x19x19 jest uśredniana
-        # globalnie i ograniczana tanh do [-1, +1].
         self.value_output = nn.Conv2d(in_channels, 1, kernel_size=1, bias=True)
         self.value_tanh = nn.Tanh()
 
@@ -102,15 +104,12 @@ class PolicyValueNet(nn.Module):
             nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
 
         for norm in self.norms:
-            if norm.weight is not None:
+            if isinstance(norm, nn.GroupNorm):
                 nn.init.ones_(norm.weight)
-            if norm.bias is not None:
                 nn.init.zeros_(norm.bias)
 
-        # Małe początkowe logity ograniczają przypadkowo bardzo ostrą policy.
         nn.init.normal_(self.policy_output.weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.policy_output.bias)
-
         nn.init.normal_(self.value_output.weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.value_output.bias)
 
@@ -133,7 +132,6 @@ class PolicyValueNet(nn.Module):
 
 
 def build_model(model_cfg: dict[str, Any], board_size: int) -> PolicyValueNet:
-    """Buduje aktualny model CNN na podstawie sekcji `model` z YAML."""
     cfg = dict(model_cfg)
     cfg.pop("compile", None)
     cfg.pop("compile_mode", None)
@@ -142,5 +140,4 @@ def build_model(model_cfg: dict[str, Any], board_size: int) -> PolicyValueNet:
 
 
 def mask_logits(logits: torch.Tensor, legal_mask: torch.Tensor) -> torch.Tensor:
-    """Blokuje zajęte pola, aby softmax nigdy nie mógł ich wybrać."""
     return logits.masked_fill(~legal_mask, torch.finfo(logits.dtype).min)
