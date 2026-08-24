@@ -16,8 +16,11 @@ def main() -> None:
     if torch.cuda.get_device_capability(device) != (12, 0):
         raise RuntimeError(f"Smoke test jest dla SM120; wykryto {torch.cuda.get_device_capability(device)}")
 
-    envs = 64
-    target = envs * 16
+    # Training-scale benchmark: enough parallel boards to saturate RTX 5070,
+    # but still a short run. The target is intentionally much smaller than a
+    # real training update, so this should finish in roughly seconds to ~1 min.
+    envs = 2048
+    target = envs * 32
     model = PolicyValueNet(board_size=19).to(device).eval()
     collector = NativeRolloutCollector(
         num_envs=envs,
@@ -39,6 +42,10 @@ def main() -> None:
     # NVCC compilation can take tens of seconds and would otherwise completely
     # swamp the actual rollout timing, making the throughput number meaningless.
     collector._ext()
+
+    # One tiny untimed warmup call is intentionally avoided here because it would
+    # advance persistent board state. The extension is already loaded and the
+    # timed run is long enough for startup overhead to be negligible.
     torch.cuda.synchronize(device)
     started = time.perf_counter()
     stats = collector.collect(
@@ -53,16 +60,21 @@ def main() -> None:
     elapsed = time.perf_counter() - started
     completed_idx, returns = collector.buffer.completed_samples(gamma=0.98)
 
+    graph_positions = stats.graph_steps * envs
     print(f"GPU: {torch.cuda.get_device_name(device)}")
+    print(f"envs: {envs:,}")
     print(f"target: {target:,}")
     print(f"completed: {stats.completed_positions:,}")
     print(f"buffer current-policy positions: {stats.generated_positions:,}")
     print(f"completed samples: {completed_idx.numel():,}")
     print(f"games: {stats.games:,}")
     print(f"graph steps: {stats.graph_steps:,}")
+    print(f"graph positions processed: {graph_positions:,}")
     print(f"elapsed (rollout only): {elapsed:.4f} s")
-    print(f"generated throughput: {stats.generated_positions / max(elapsed, 1e-9):,.0f} pos/s")
-    print(f"completed throughput: {stats.completed_positions / max(elapsed, 1e-9):,.0f} pos/s")
+    print(f"graph-step rate: {stats.graph_steps / max(elapsed, 1e-9):,.1f} steps/s")
+    print(f"all-table throughput: {graph_positions / max(elapsed, 1e-9):,.0f} board-actions/s")
+    print(f"generated throughput: {stats.generated_positions / max(elapsed, 1e-9):,.0f} current-policy pos/s")
+    print(f"completed throughput: {stats.completed_positions / max(elapsed, 1e-9):,.0f} completed pos/s")
     print(f"returns finite: {bool(torch.isfinite(returns).all().item())}")
 
     if stats.completed_positions < target:
