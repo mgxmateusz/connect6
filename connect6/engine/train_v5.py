@@ -224,10 +224,11 @@ def train(config_path: str | Path) -> None:
             pack_started = time.perf_counter()
             packed = pack_rollout_models(model, historical, device)
             pack_seconds = time.perf_counter() - pack_started
+            historical_models_loaded = len(historical)
 
             assignments = build_rollout_assignments(
                 num_envs,
-                historical_model_count=len(historical),
+                historical_model_count=historical_models_loaded,
                 device=device,
                 historical_fraction=historical_fraction,
                 bot_fraction=bot_fraction,
@@ -267,7 +268,7 @@ def train(config_path: str | Path) -> None:
                     advantages.std(unbiased=False) + 1e-8
                 )
 
-            # Native packed inference tensors are no longer needed during PPO.
+            # Packed inference tensors are no longer needed during PPO.
             del packed, historical
 
             ppo_started = time.perf_counter()
@@ -405,6 +406,8 @@ def train(config_path: str | Path) -> None:
             game_denom = max(1, rollout.games)
             history_denom = max(1, rollout.history_games)
             bot_denom = max(1, rollout.bot_games)
+            bot_v1_denom = max(1, rollout.bot_v1_games)
+            bot_v2_denom = max(1, rollout.bot_v2_games)
             cache_requests = history_hits + history_misses
 
             gpu_allocated_gb = torch.cuda.memory_allocated(device) / 1e9
@@ -457,7 +460,7 @@ def train(config_path: str | Path) -> None:
                 "mean_game_length": rollout.game_length_sum / game_denom,
                 "historical_fraction": historical_fraction,
                 "historical_tables": assignments.history_tables,
-                "historical_models_loaded": len(historical) if 'historical' in locals() else packed.num_models - 1 if 'packed' in locals() else 0,
+                "historical_models_loaded": historical_models_loaded,
                 "historical_games_completed": history_games_total,
                 "historical_games_this_update": rollout.history_games,
                 "historical_wins": rollout.history_wins,
@@ -483,6 +486,18 @@ def train(config_path: str | Path) -> None:
                 "bot_draws": rollout.bot_draws,
                 "bot_win_rate": rollout.bot_wins / bot_denom,
                 "bot_score_rate": (rollout.bot_wins + 0.5 * rollout.bot_draws) / bot_denom,
+                "bot_v1_games_this_update": rollout.bot_v1_games,
+                "bot_v1_wins": rollout.bot_v1_wins,
+                "bot_v1_losses": rollout.bot_v1_losses,
+                "bot_v1_draws": rollout.bot_v1_draws,
+                "bot_v1_win_rate": rollout.bot_v1_wins / bot_v1_denom,
+                "bot_v1_score_rate": (rollout.bot_v1_wins + 0.5 * rollout.bot_v1_draws) / bot_v1_denom,
+                "bot_v2_games_this_update": rollout.bot_v2_games,
+                "bot_v2_wins": rollout.bot_v2_wins,
+                "bot_v2_losses": rollout.bot_v2_losses,
+                "bot_v2_draws": rollout.bot_v2_draws,
+                "bot_v2_win_rate": rollout.bot_v2_wins / bot_v2_denom,
+                "bot_v2_score_rate": (rollout.bot_v2_wins + 0.5 * rollout.bot_v2_draws) / bot_v2_denom,
                 "completed_positions_this_update": train_size,
                 "generated_positions_this_update": generated_positions,
                 "discarded_positions_this_update": discarded_positions,
@@ -509,6 +524,7 @@ def train(config_path: str | Path) -> None:
                 f"games={rollout.games:,} complete={train_size:,} discard={discarded_positions:,} "
                 f"hist={assignments.history_tables}/{len(history_cache)} "
                 f"bots={assignments.bot_v1_tables}+{assignments.bot_v2_tables} "
+                f"V1={metrics['bot_v1_win_rate']:.1%} V2={metrics['bot_v2_win_rate']:.1%} "
                 f"collect={metrics['selfplay_positions_per_second']:,.0f} pos/s "
                 f"VRAM={gpu_allocated_gb:.2f}/{gpu_reserved_gb:.2f}GB"
             )
