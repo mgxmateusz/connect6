@@ -16,11 +16,13 @@ def main() -> None:
     if torch.cuda.get_device_capability(device) != (12, 0):
         raise RuntimeError(f"Smoke test jest dla SM120; wykryto {torch.cuda.get_device_capability(device)}")
 
-    # Training-scale benchmark: enough parallel boards to saturate RTX 5070,
-    # but still a short run. The target is intentionally much smaller than a
-    # real training update, so this should finish in roughly seconds to ~1 min.
+    # Match the real training collector size from configs/train.yaml.
+    # num_envs=2048 and completed_positions_per_update=384, so the benchmark
+    # stops at the same completed-position target as one genuine PPO update.
     envs = 2048
-    target = envs * 32
+    completed_positions_per_update = 384
+    target = envs * completed_positions_per_update
+
     model = PolicyValueNet(board_size=19).to(device).eval()
     collector = NativeRolloutCollector(
         num_envs=envs,
@@ -43,9 +45,9 @@ def main() -> None:
     # swamp the actual rollout timing, making the throughput number meaningless.
     collector._ext()
 
-    # One tiny untimed warmup call is intentionally avoided here because it would
-    # advance persistent board state. The extension is already loaded and the
-    # timed run is long enough for startup overhead to be negligible.
+    # No untimed gameplay warmup: persistent boards should start exactly like a
+    # fresh training run. The measured section therefore represents one complete
+    # collector update from empty boards to the configured PPO sample target.
     torch.cuda.synchronize(device)
     started = time.perf_counter()
     stats = collector.collect(
@@ -63,6 +65,7 @@ def main() -> None:
     graph_positions = stats.graph_steps * envs
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"envs: {envs:,}")
+    print(f"completed_positions_per_update: {completed_positions_per_update:,}")
     print(f"target: {target:,}")
     print(f"completed: {stats.completed_positions:,}")
     print(f"buffer current-policy positions: {stats.generated_positions:,}")
