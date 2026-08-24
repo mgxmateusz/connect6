@@ -86,9 +86,6 @@ def train(config_path: str | Path) -> None:
     checkpoint_mgr = CheckpointManager(run_dir / "checkpoints")
     logger = TrainingLogger(run_dir)
 
-    # Channels-last/NHWC gives cuDNN a tensor-core friendly memory layout for
-    # Conv2d on RTX 50. Keep model parameters in the same layout for both PPO and
-    # checkpointing; state_dict remains fully normal PyTorch tensors.
     model = build_model(model_cfg, board_size).to(device)
     model = model.to(memory_format=torch.channels_last)
     base_lr = float(tr.get("learning_rate", 3e-4))
@@ -150,6 +147,7 @@ def train(config_path: str | Path) -> None:
     target_kl = float(tr.get("target_kl", 0.03))
     kl_window = max(1, int(tr.get("kl_window", 32)))
     kl_hard_multiplier = max(1.0, float(tr.get("kl_hard_multiplier", 3.0)))
+    kl_sync_interval = max(1, int(tr.get("kl_sync_interval", 32)))
     normalize_adv = bool(tr.get("normalize_advantage", True))
     checkpoint_every = max(1, int(tr.get("checkpoint_every_updates", 25)))
     dashboard_every = max(1, int(tr.get("dashboard_every_updates", 5)))
@@ -160,8 +158,9 @@ def train(config_path: str | Path) -> None:
     bot_games_total = 0
 
     print(f"[urządzenie] {device} | {torch.cuda.get_device_name(device)}")
-    print(f"[model] CNN V6 | GroupNorm layers=0,2,5,7 | channels_last=on")
-    print(f"[optimizer] fused AdamW | foreach gradient clipping")
+    print("[model] CNN V6 dense | GroupNorm layers=0,2,5,7 | channels_last=on")
+    print("[optimizer] fused AdamW | foreach gradient clipping")
+    print(f"[ppo] KL watchdog sync co {kl_sync_interval} minibatchy")
     print(
         f"[collector] envs={num_envs:,} | target={num_envs:,}*{completed_per_env:,}="
         f"{completed_target:,} pełnych pozycji"
@@ -255,6 +254,7 @@ def train(config_path: str | Path) -> None:
             planned = ppo_epochs * minibatches_per_epoch
             checked = 0
             completed = 0
+            synced_until = 0
             kl_rolling_last = 0.0
             ppo_stop_epoch = 0
             ppo_stop_minibatch = 0
@@ -263,6 +263,30 @@ def train(config_path: str | Path) -> None:
             grad_norm_values = torch.empty(planned, dtype=torch.float32, device=device)
             grad_scale_values = torch.empty_like(grad_norm_values)
             grad_clipped_values = torch.empty_like(grad_norm_values)
+            kl_values = torch.empty((planned, 2), dtype=torch.float32, device=device)
+
+            def sync_kl_watchdog(current_epoch: int, current_mb: int) -> bool:
+                nonlocal synced_until, kl_rolling_last, stop_for_kl, kl_stop_kind
+                nonlocal ppo_stop_epoch, ppo_stop_minibatch
+                if checked <= synced_until:
+                    return False
+                chunk = kl_values[synced_until:checked].cpu().tolist()
+                base_index = synced_until
+                synced_until = checked
+                for offset, (approx_kl, clipfrac) in enumerate(chunk):
+                    kls.append(float(approx_kl))
+                    clipfracs.append(float(clipfrac))
+                    kl_rolling_last = _mean(kls[-kl_window:])
+                    hard_stop = target_kl > 0 and approx_kl > target_kl * kl_hard_multiplier
+                    soft_stop = target_kl > 0 and len(kls) >= kl_window and kl_rolling_last > target_kl
+                    if hard_stop or soft_stop:
+                        stop_for_kl = True
+                        kl_stop_kind = "hard" if hard_stop else "rolling"
+                        absolute_checked = base_index + offset
+                        ppo_stop_epoch = absolute_checked // minibatches_per_epoch + 1
+                        ppo_stop_minibatch = absolute_checked % minibatches_per_epoch + 1
+                        return True
+                return False
 
             for epoch in range(ppo_epochs):
                 order = torch.randperm(train_size, device=device)
@@ -296,21 +320,13 @@ def train(config_path: str | Path) -> None:
                     with torch.no_grad():
                         approx_kl_t = ((ratio - 1.0) - logratio).mean()
                         clipfrac_t = ((ratio - 1.0).abs() > clip_coef).float().mean()
-                        kl_clip = torch.stack((approx_kl_t, clipfrac_t)).cpu()
-                        approx_kl = float(kl_clip[0])
-                        clipfrac = float(kl_clip[1])
+                        kl_values[checked, 0] = approx_kl_t
+                        kl_values[checked, 1] = clipfrac_t
 
                     checked += 1
-                    kls.append(approx_kl)
-                    clipfracs.append(clipfrac)
-                    kl_rolling_last = _mean(kls[-kl_window:])
-                    hard_stop = target_kl > 0 and approx_kl > target_kl * kl_hard_multiplier
-                    soft_stop = target_kl > 0 and len(kls) >= kl_window and kl_rolling_last > target_kl
-                    if hard_stop or soft_stop:
-                        stop_for_kl = True
-                        kl_stop_kind = "hard" if hard_stop else "rolling"
-                        ppo_stop_epoch = epoch + 1
-                        ppo_stop_minibatch = start // minibatch_size + 1
+                    end_of_epoch = start + minibatch_size >= train_size
+                    should_sync = (checked - synced_until) >= kl_sync_interval or end_of_epoch
+                    if should_sync and sync_kl_watchdog(epoch + 1, start // minibatch_size + 1):
                         optimizer.zero_grad(set_to_none=True)
                         break
 
@@ -321,8 +337,6 @@ def train(config_path: str | Path) -> None:
                     else:
                         loss.backward()
 
-                    # foreach=True batches norm/scale work across parameter tensors
-                    # instead of issuing many tiny pointwise CUDA operations.
                     grad_norm = nn.utils.clip_grad_norm_(
                         model.parameters(),
                         max_grad_norm,
@@ -350,6 +364,8 @@ def train(config_path: str | Path) -> None:
 
                 if stop_for_kl:
                     break
+
+            sync_kl_watchdog(ppo_epochs, minibatches_per_epoch)
 
             if completed:
                 vals = ppo_values[:completed]
@@ -401,6 +417,7 @@ def train(config_path: str | Path) -> None:
                 "target_kl": target_kl,
                 "kl_window": kl_window,
                 "kl_hard_limit": target_kl * kl_hard_multiplier,
+                "kl_sync_interval": kl_sync_interval,
                 "ppo_early_stop": float(stop_for_kl),
                 "ppo_kl_hard_stop": float(kl_stop_kind == "hard"),
                 "ppo_kl_rolling_stop": float(kl_stop_kind == "rolling"),
