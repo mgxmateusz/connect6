@@ -46,7 +46,7 @@ class NativeRolloutState:
 
 
 class NativeRolloutBuffer:
-    """GPU storage filled directly by the native rollout graph."""
+    """GPU rollout storage shared by the fast cuDNN collector and PPO."""
 
     def __init__(
         self,
@@ -79,6 +79,38 @@ class NativeRolloutBuffer:
         self.episode_terminal_moves = torch.empty(
             self.episode_capacity, dtype=torch.int16, device=device
         )
+
+    def append_batch(
+        self,
+        *,
+        boards: torch.Tensor,
+        players: torch.Tensor,
+        stones_left: torch.Tensor,
+        move_counts: torch.Tensor,
+        actions: torch.Tensor,
+        logprobs: torch.Tensor,
+        values: torch.Tensor,
+        episode_ids: torch.Tensor,
+    ) -> None:
+        """Append one compact current-policy batch without leaving the GPU."""
+        batch = int(boards.shape[0])
+        if batch == 0:
+            return
+        start = self.count
+        end = start + batch
+        if end > self.capacity:
+            raise RuntimeError(
+                f"Rollout buffer capacity exceeded: {end:,} > {self.capacity:,}"
+            )
+        self.boards[start:end].copy_(boards)
+        self.players[start:end].copy_(players)
+        self.stones_left[start:end].copy_(stones_left)
+        self.move_counts[start:end].copy_(move_counts.to(torch.int16))
+        self.actions[start:end].copy_(actions.to(torch.int16))
+        self.logprobs[start:end].copy_(logprobs.float())
+        self.values[start:end].copy_(values.float())
+        self.episode_ids[start:end].copy_(episode_ids.to(torch.int32))
+        self.count = end
 
     def completed_samples(self, gamma: float) -> tuple[torch.Tensor, torch.Tensor]:
         used_episode_ids = self.episode_ids[: self.count].long()
@@ -175,7 +207,7 @@ def pack_rollout_models(
     *,
     chunk_size: int = 16,
 ) -> PackedRolloutModels:
-    """Pack current model as id 0 and sampled history as ids 1..M for WMMA."""
+    """Pack current model as id 0 and sampled history as ids 1..M for GPU inference."""
     if device.type != "cuda":
         raise ValueError("Native rollout packing wymaga CUDA")
     base = _validate_current_model(model)
