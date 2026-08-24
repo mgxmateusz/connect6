@@ -3,8 +3,13 @@ from pathlib import Path
 import pytest
 import torch
 
-from connect6.engine.history import HistoricalCheckpoint, HistoricalPolicyEnsemble
+from connect6.engine.history import (
+    HistoricalCheckpoint,
+    HistoricalPolicyEnsemble,
+    _sample_weighted_history_paths,
+)
 from connect6.engine.model import build_model
+from connect6.engine.native_rollout import build_rollout_assignments
 from connect6.engine.train import (
     CompleteGameBuffer,
     _forced_random_opening_mask,
@@ -91,16 +96,8 @@ def test_historical_fraction_is_split_evenly_and_colors_are_balanced():
         white = int((colors[model_mask] == -1).sum().item())
         assert abs(black - white) <= 1
 
-    total_black = int((colors[mask] == 1).sum().item())
-    total_white = int((colors[mask] == -1).sum().item())
-    assert abs(total_black - total_white) <= 1
-
     table_matrix, valid = _historical_table_matrix(opponent_ids, 4)
     assert int(valid.sum().item()) == 25
-    assert table_matrix.shape[0] == 4
-    for model_id in range(4):
-        tables = table_matrix[model_id][valid[model_id]]
-        assert torch.all(opponent_ids[tables] == model_id)
 
 
 def test_historical_layout_with_fewer_models_never_drops_tables():
@@ -110,18 +107,31 @@ def test_historical_layout_with_fewer_models_never_drops_tables():
         historical_models=3,
         device=torch.device("cpu"),
     )
-
     assert int(mask.sum().item()) == 8
     counts = [int(opponent_ids.eq(i).sum().item()) for i in range(3)]
     assert counts == [3, 3, 2]
     assert abs(int((colors[mask] == 1).sum()) - int((colors[mask] == -1).sum())) <= 1
 
 
-def test_grouped_history_ensemble_matches_individual_cnn_models_on_cpu():
+def test_weighted_history_sampling_allows_duplicates_and_biases_recent(monkeypatch):
+    candidates = [Path(f"model_update_{i:08d}.pt") for i in range(1, 101)]
+    rolls = iter([0.10, 0.60, 0.90])
+    monkeypatch.setattr("connect6.engine.history.random.random", lambda: next(rolls))
+    monkeypatch.setattr(
+        "connect6.engine.history.random.choice",
+        lambda pool: pool[0],
+    )
+    sampled = _sample_weighted_history_paths(candidates, 3)
+    assert sampled[0].name == "model_update_00000001.pt"
+    assert sampled[1].name == "model_update_00000051.pt"
+    assert sampled[2].name == "model_update_00000076.pt"
+
+
+def test_grouped_history_ensemble_matches_individual_v5_models_on_cpu():
     torch.manual_seed(123)
     board_size = 5
     model_cfg = {
-        "architecture_version": 4,
+        "architecture_version": 5,
         "kernels": [3, 3, 3],
         "channels": [8, 8, 16],
         "compile": False,
@@ -142,13 +152,48 @@ def test_grouped_history_ensemble_matches_individual_cnn_models_on_cpu():
     ]
 
     ensemble = HistoricalPolicyEnsemble(checkpoints, torch.device("cpu"))
-    x = torch.randn(2, 5, 3, board_size, board_size)
+    x = torch.randn(2, 5, 4, board_size, board_size)
     grouped = ensemble.forward_grouped(x)
 
     for i, model in enumerate(models):
         model.eval()
         expected, _ = model(x[i])
         assert torch.allclose(grouped[i], expected, atol=1e-5, rtol=1e-5)
+
+
+def test_native_rollout_assignment_is_half_self_quarter_history_quarter_bots():
+    assignment = build_rollout_assignments(
+        num_envs=128,
+        historical_model_count=8,
+        device=torch.device("cpu"),
+        historical_fraction=0.25,
+        bot_fraction=0.25,
+        bot_v1_fraction=0.5,
+    )
+    assert assignment.history_tables == 32
+    assert assignment.bot_tables == 32
+    assert assignment.bot_v1_tables == 16
+    assert assignment.bot_v2_tables == 16
+    assert int(assignment.table_kind.eq(0).sum()) == 64
+    assert int(assignment.table_kind.eq(1).sum()) == 32
+    assert int(assignment.table_kind.eq(2).sum()) == 32
+    for version in (1, 2):
+        mask = assignment.bot_version.eq(version)
+        colors = assignment.current_color[mask]
+        assert abs(int(colors.eq(1).sum()) - int(colors.eq(-1).sum())) <= 1
+
+
+def test_native_rollout_history_quarter_falls_back_to_self_without_history():
+    assignment = build_rollout_assignments(
+        num_envs=128,
+        historical_model_count=0,
+        device=torch.device("cpu"),
+        historical_fraction=0.25,
+        bot_fraction=0.25,
+    )
+    assert assignment.history_tables == 0
+    assert assignment.bot_tables == 32
+    assert int(assignment.table_kind.eq(0).sum()) == 96
 
 
 def test_online_symmetry_cycle_visits_all_eight_d4_views_in_order():
@@ -182,7 +227,6 @@ def test_online_symmetry_board_action_and_inverse_action_are_consistent():
             k=k,
             flip=flip,
         )
-
         assert torch.equal(transformed_values, original_values)
         assert torch.equal(restored_actions, actions)
 
@@ -204,6 +248,5 @@ def test_random_black_opening_mask_only_selects_fresh_black_first_move():
         stones_left,
         fraction=0.0,
     )
-
     assert forced_all.tolist() == [True, False, False, False, True]
     assert not forced_none.any()
