@@ -35,6 +35,10 @@ def main() -> None:
         bot_v1_fraction=0.50,
     )
 
+    # Build/load the native extension before the timed section. On the first run
+    # NVCC compilation can take tens of seconds and would otherwise completely
+    # swamp the actual rollout timing, making the throughput number meaningless.
+    collector._ext()
     torch.cuda.synchronize(device)
     started = time.perf_counter()
     stats = collector.collect(
@@ -56,7 +60,7 @@ def main() -> None:
     print(f"completed samples: {completed_idx.numel():,}")
     print(f"games: {stats.games:,}")
     print(f"graph steps: {stats.graph_steps:,}")
-    print(f"elapsed: {elapsed:.4f} s")
+    print(f"elapsed (rollout only): {elapsed:.4f} s")
     print(f"generated throughput: {stats.generated_positions / max(elapsed, 1e-9):,.0f} pos/s")
     print(f"completed throughput: {stats.completed_positions / max(elapsed, 1e-9):,.0f} pos/s")
     print(f"returns finite: {bool(torch.isfinite(returns).all().item())}")
