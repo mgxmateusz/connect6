@@ -23,7 +23,7 @@ _IN_CHANNELS = (4, 32, 32, 64, 64, 64, 96, 96)
 _GROUP_CHANNELS = 8
 _UNKNOWN_EPISODE_RESULT = 2
 _UNKNOWN_TERMINAL_MOVE = -1
-_STATS_COUNT = 13
+_STATS_COUNT = 21
 
 
 @dataclass(slots=True)
@@ -55,6 +55,14 @@ class NativeRolloutStats:
     bot_wins: int
     bot_losses: int
     bot_draws: int
+    bot_v1_games: int
+    bot_v1_wins: int
+    bot_v1_losses: int
+    bot_v1_draws: int
+    bot_v2_games: int
+    bot_v2_wins: int
+    bot_v2_losses: int
+    bot_v2_draws: int
     graph_steps: int
     symmetry_phase: int
 
@@ -470,6 +478,8 @@ class NativeRolloutCollector:
         kind = assignments.table_kind
         history_kind = kind.eq(TABLE_HISTORY)
         bot_kind = kind.eq(TABLE_BOT)
+        bot_v1_kind = bot_kind & assignments.bot_version.eq(1)
+        bot_v2_kind = bot_kind & assignments.bot_version.eq(2)
         opponent_kind = history_kind | bot_kind
 
         torch.cuda.manual_seed(int(seed) & 0x7FFFFFFF)
@@ -589,8 +599,13 @@ class NativeRolloutCollector:
             done_i64 = done.to(torch.int64)
             winners = step.winner
             full_lengths = step.game_lengths.to(torch.int64)
+            current_win = winners.eq(current_color)
+            current_loss = winners.eq(-current_color)
+            draw = winners.eq(0)
             done_history = done & history_kind
             done_bot = done & bot_kind
+            done_bot_v1 = done & bot_v1_kind
+            done_bot_v2 = done & bot_v2_kind
 
             # Episode result writes stay fixed-size and entirely on-device.
             episode_slots = current_episode_ids.long()
@@ -607,19 +622,29 @@ class NativeRolloutCollector:
             completed_gpu.add_(completed_add)
 
             # Aggregate all reporting counters on GPU; transfer only once at end.
+            # The extra V1/V2 counters add only a few tiny 2048-element reductions
+            # and introduce no extra CPU-GPU synchronization.
             stats_gpu[0].add_(done_i64.sum())
             stats_gpu[1].add_((done & winners.eq(1)).sum())
             stats_gpu[2].add_((done & winners.eq(-1)).sum())
-            stats_gpu[3].add_((done & winners.eq(0)).sum())
+            stats_gpu[3].add_((done & draw).sum())
             stats_gpu[4].add_((full_lengths * done_i64).sum())
             stats_gpu[5].add_(done_history.sum())
-            stats_gpu[6].add_((done_history & winners.eq(current_color)).sum())
-            stats_gpu[7].add_((done_history & winners.eq(-current_color)).sum())
-            stats_gpu[8].add_((done_history & winners.eq(0)).sum())
+            stats_gpu[6].add_((done_history & current_win).sum())
+            stats_gpu[7].add_((done_history & current_loss).sum())
+            stats_gpu[8].add_((done_history & draw).sum())
             stats_gpu[9].add_(done_bot.sum())
-            stats_gpu[10].add_((done_bot & winners.eq(current_color)).sum())
-            stats_gpu[11].add_((done_bot & winners.eq(-current_color)).sum())
-            stats_gpu[12].add_((done_bot & winners.eq(0)).sum())
+            stats_gpu[10].add_((done_bot & current_win).sum())
+            stats_gpu[11].add_((done_bot & current_loss).sum())
+            stats_gpu[12].add_((done_bot & draw).sum())
+            stats_gpu[13].add_(done_bot_v1.sum())
+            stats_gpu[14].add_((done_bot_v1 & current_win).sum())
+            stats_gpu[15].add_((done_bot_v1 & current_loss).sum())
+            stats_gpu[16].add_((done_bot_v1 & draw).sum())
+            stats_gpu[17].add_(done_bot_v2.sum())
+            stats_gpu[18].add_((done_bot_v2 & current_win).sum())
+            stats_gpu[19].add_((done_bot_v2 & current_loss).sum())
+            stats_gpu[20].add_((done_bot_v2 & draw).sum())
 
             # Reset completed boards without torch.nonzero / dynamic indices.
             self.env.boards.masked_fill_(done[:, None, None], 0)
@@ -672,6 +697,14 @@ class NativeRolloutCollector:
             bot_wins=stats[10],
             bot_losses=stats[11],
             bot_draws=stats[12],
+            bot_v1_games=stats[13],
+            bot_v1_wins=stats[14],
+            bot_v1_losses=stats[15],
+            bot_v1_draws=stats[16],
+            bot_v2_games=stats[17],
+            bot_v2_wins=stats[18],
+            bot_v2_losses=stats[19],
+            bot_v2_draws=stats[20],
             graph_steps=steps,
             symmetry_phase=self.symmetry_phase,
         )
