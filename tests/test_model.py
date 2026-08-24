@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 
 from connect6.engine.model import PolicyValueNet, build_model
 from connect6.engine.train import (
@@ -21,7 +22,7 @@ def test_model_shapes():
 
 def test_explicit_cnn_architecture_from_config():
     cfg = {
-        "architecture_version": 5,
+        "architecture_version": 6,
         "kernels": [23, 3, 3, 3, 3, 3, 3, 3],
         "channels": [32, 32, 64, 64, 64, 96, 96, 96],
         "compile": False,
@@ -32,8 +33,13 @@ def test_explicit_cnn_architecture_from_config():
     assert [m.out_channels for m in model.convs] == [32, 32, 64, 64, 64, 96, 96, 96]
     assert model.convs[0].in_channels == 4
     assert all(conv.bias is None for conv in model.convs)
-    assert [norm.num_groups for norm in model.norms] == [4, 4, 8, 8, 8, 12, 12, 12]
-    assert [norm.num_channels // norm.num_groups for norm in model.norms] == [8] * 8
+    assert model.norm_layers == (0, 2, 5, 7)
+    for layer, norm in enumerate(model.norms):
+        if layer in model.norm_layers:
+            assert isinstance(norm, nn.GroupNorm)
+            assert norm.num_channels // norm.num_groups == 8
+        else:
+            assert isinstance(norm, nn.Identity)
     assert model.policy_output.kernel_size == (1, 1)
     assert model.policy_output.in_channels == 96
     assert model.policy_output.out_channels == 1
@@ -63,7 +69,7 @@ def test_groupnorm_requires_eight_channels_per_group():
     except ValueError as exc:
         assert "podzielną przez 8" in str(exc)
     else:
-        raise AssertionError("Kanały niepodzielne przez 8 powinny zostać odrzucone")
+        raise AssertionError("Kanały aktywnego GroupNorm niepodzielne przez 8 powinny zostać odrzucone")
 
 
 def test_symmetry_transform_keeps_action_on_transformed_stone():
