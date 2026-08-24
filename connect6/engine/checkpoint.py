@@ -84,12 +84,12 @@ def load_model_for_inference(
     payload = load_checkpoint(path, map_location="cpu")
     game_cfg = payload["game_config"]
     model_cfg = payload["model_config"]
-    if int(model_cfg.get("architecture_version", 0)) != 5:
-        raise RuntimeError(
-            f"Checkpoint {path} nie używa aktualnej architektury CNN v5."
-        )
+    if int(model_cfg.get("architecture_version", 0)) != 6:
+        raise RuntimeError(f"Checkpoint {path} nie używa aktualnej architektury CNN v6.")
     model = build_model(model_cfg, int(game_cfg["board_size"]))
     model.load_state_dict(payload["model_state"])
     model.to(device)
+    if torch.device(device).type == "cuda":
+        model.to(memory_format=torch.channels_last)
     model.eval()
     return model, payload
