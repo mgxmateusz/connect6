@@ -71,5 +71,7 @@ def test_vector_env_cpu_device():
     result = env.step(actions)
     assert result.done.shape == (4,)
     network_input = env.network_input()
-    assert network_input.shape == (4, 3, 9, 9)
+    assert network_input.shape == (4, 4, 9, 9)
     assert network_input.dtype == torch.float32
+    assert torch.all(network_input[:, 2] == 1.0)
+    assert torch.all(network_input[:, 3] == 0.0)
