@@ -105,6 +105,16 @@ class TrainingLogger:
                 "description": "Jedna prosta miara anti-forgetting: procent wygranych bieżącej polityki przeciw losowanej puli starszych checkpointów.",
             },
             {
+                "id": "bots_chart",
+                "title": "Wygrane current vs boty",
+                "metrics": [
+                    {"key": "bot_v1_win_rate", "label": "vs Bot V1", "percent": True},
+                    {"key": "bot_v2_win_rate", "label": "vs Bot V2", "percent": True},
+                ],
+                "y_range": [0, 100],
+                "description": "Bardzo czytelny zewnętrzny benchmark siły: odsetek wygranych bieżącej polityki osobno przeciw GPU Tactical Bot V1 i V2. Liczniki powstają w tym samym collectcie bez dodatkowej synchronizacji CPU-GPU.",
+            },
+            {
                 "id": "kl_chart",
                 "title": "Approx KL — przebieg i limity early-stop",
                 "metrics": [
@@ -320,6 +330,10 @@ class TrainingLogger:
             ("KL last", f"{latest_float('approx_kl_last'):.5f}", ""),
             ("Target KL", f"{latest_float('target_kl'):.5f}", ""),
             ("History win rate", f"{latest_float('historical_win_rate') * 100:.2f}%", ""),
+            ("Bot V1 win rate", f"{latest_float('bot_v1_win_rate') * 100:.2f}%", ""),
+            ("Bot V2 win rate", f"{latest_float('bot_v2_win_rate') * 100:.2f}%", ""),
+            ("Bot V1 gry / update", int(latest_float("bot_v1_games_this_update")), ""),
+            ("Bot V2 gry / update", int(latest_float("bot_v2_games_this_update")), ""),
             ("History gry / update", int(latest_float("historical_games_this_update")), ""),
             ("History RAM cache", f"{int(latest_float('historical_ram_cache_models'))} / {int(latest_float('historical_ram_cache_limit'))}", ""),
             ("RAM cache hit", f"{latest_float('historical_ram_cache_hit_rate') * 100:.1f}%", ""),
