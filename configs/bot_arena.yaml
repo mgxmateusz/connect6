@@ -1,5 +1,5 @@
 bot_arena:
-  checkpoint_dir: "runs/connect6_5/checkpoints"
+  checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
   output_dir: "runs/connect6_cnn_05/bot_arena"
   device: "cuda"
 
