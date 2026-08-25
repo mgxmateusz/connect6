@@ -3,7 +3,8 @@
 
 std::vector<torch::Tensor> run_championship_cuda(
     std::vector<torch::Tensor> weights,
-    std::vector<torch::Tensor> biases,
+    std::vector<torch::Tensor> norm_weights,
+    std::vector<torch::Tensor> norm_biases,
     torch::Tensor policy_weight,
     torch::Tensor game_ids,
     int64_t num_models,
@@ -13,6 +14,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "run_championship",
         &run_championship_cuda,
-        "Connect6 fully device-side championship (SM120, FP16 WMMA)"
+        "Connect6 fully device-side championship V6 (SM120, FP16 WMMA + GroupNorm)"
     );
 }
