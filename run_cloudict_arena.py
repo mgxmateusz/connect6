@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import time
@@ -14,16 +15,28 @@ RECOVERABLE_MARKERS = (
 )
 MAX_RESTARTS = 20
 BOARD_SIZE = 19
-CENTER_ACTIONS = tuple(
-    row * BOARD_SIZE + col
-    for row in range(8, 11)
-    for col in range(8, 11)
-)
-CENTER_OUTPUT_DIRS = {
-    3: Path("runs/connect6_cnn_05/cloudict_d3_center3x3_update_00001340"),
-    4: Path("runs/connect6_cnn_05/cloudict_d4_center3x3_update_00001340"),
-}
 _PROTOCOL_SYMMETRY = 0
+
+# Jeden wspolny katalog dla calej drabinki Cloudicta.
+DEFAULT_LADDER_OUTPUT_DIR = Path(
+    "runs/connect6_cnn_05/cloudict_ladder_update_00001340"
+)
+
+# depth -> szerokosc kwadratu startowego wokol centrum.
+# D2 zachowuje pelne 19x19; kolejne poziomy dostaja coraz mniejszy wycinek.
+STAGE_SIZES = {
+    2: 19,
+    3: 9,
+    4: 5,
+    5: 3,
+}
+
+# Stare katalogi sa tylko zrodlem migracji. Niczego z nich nie kasujemy.
+LEGACY_RESULT_FILES = {
+    2: Path("runs/connect6_cnn_05/cloudict_d2_update_00001340/results.csv"),
+    3: Path("runs/connect6_cnn_05/cloudict_d3_center3x3_update_00001340/results.csv"),
+    4: Path("runs/connect6_cnn_05/cloudict_d4_center3x3_update_00001340/results.csv"),
+}
 
 
 def _transform_action(action: int, symmetry: int) -> int:
@@ -109,12 +122,75 @@ def _cli_value(flag: str, default: str) -> str:
     return sys.argv[index + 1]
 
 
-def _center_schedule() -> list[tuple[int, bool]]:
+def _center_actions(size: int) -> tuple[int, ...]:
+    if size == BOARD_SIZE:
+        return tuple(range(BOARD_SIZE * BOARD_SIZE))
+    if size <= 0 or size > BOARD_SIZE or size % 2 == 0:
+        raise ValueError(f"Nieprawidlowy rozmiar wycinka: {size}")
+    radius = size // 2
+    center = BOARD_SIZE // 2
+    return tuple(
+        row * BOARD_SIZE + col
+        for row in range(center - radius, center + radius + 1)
+        for col in range(center - radius, center + radius + 1)
+    )
+
+
+def _schedule(actions: tuple[int, ...]) -> list[tuple[int, bool]]:
     return [
         (opening_action, model_is_black)
-        for opening_action in CENTER_ACTIONS
+        for opening_action in actions
         for model_is_black in (True, False)
     ]
+
+
+def _stage_paths(output_dir: Path, depth: int) -> tuple[Path, Path, Path]:
+    return (
+        output_dir / f"d{depth}_results.csv",
+        output_dir / f"d{depth}_config.json",
+        output_dir / f"d{depth}_summary.json",
+    )
+
+
+def _migrate_legacy_results(
+    *,
+    depth: int,
+    results_path: Path,
+    allowed_actions: set[int],
+) -> int:
+    if results_path.exists() and results_path.stat().st_size > 0:
+        return 0
+    legacy = LEGACY_RESULT_FILES.get(depth)
+    if legacy is None:
+        return 0
+    legacy = legacy.resolve()
+    if not legacy.exists() or legacy.stat().st_size == 0:
+        return 0
+
+    rows = arena._load_rows(legacy)
+    filtered = [
+        row
+        for row in rows
+        if int(row.get("opening_action", -1)) in allowed_actions
+        and row.get("model_color") in {"BLACK", "WHITE"}
+    ]
+    if not filtered:
+        return 0
+
+    # Usuwamy ewentualne duplikaty po (start, kolor), zachowujac pierwszy wynik.
+    unique: dict[tuple[int, str], dict[str, str]] = {}
+    for row in filtered:
+        key = (int(row["opening_action"]), row["model_color"])
+        unique.setdefault(key, row)
+
+    with results_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=arena.RESULT_FIELDS)
+        writer.writeheader()
+        for index, row in enumerate(unique.values(), start=1):
+            cleaned = {field: row.get(field, "") for field in arena.RESULT_FIELDS}
+            cleaned["game_index"] = index
+            writer.writerow(cleaned)
+    return len(unique)
 
 
 def _print_stage_summary(summary: dict[str, object], *, depth: int) -> None:
@@ -143,7 +219,7 @@ def _print_stage_summary(summary: dict[str, object], *, depth: int) -> None:
     )
 
 
-def _run_center_stage(depth: int, stage_no: int, total_stages: int) -> None:
+def _run_stage(depth: int, stage_no: int, total_stages: int) -> None:
     checkpoint = Path(
         _cli_value("--checkpoint", str(arena.DEFAULT_CHECKPOINT))
     ).resolve()
@@ -154,17 +230,26 @@ def _run_center_stage(depth: int, stage_no: int, total_stages: int) -> None:
     timeout = float(_cli_value("--timeout", "60.0"))
     vcf = "--vcf" in sys.argv
     reset = "--reset" in sys.argv
-
-    output_dir = CENTER_OUTPUT_DIRS[depth].resolve()
+    output_dir = Path(
+        _cli_value("--output-dir", str(DEFAULT_LADDER_OUTPUT_DIR))
+    ).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    results_path = output_dir / "results.csv"
-    config_path = output_dir / "run_config.json"
-    summary_path = output_dir / "summary.json"
+
+    size = STAGE_SIZES[depth]
+    actions = _center_actions(size)
+    schedule = _schedule(actions)
+    results_path, config_path, summary_path = _stage_paths(output_dir, depth)
+
     if reset:
         for path in (results_path, config_path, summary_path):
             path.unlink(missing_ok=True)
 
-    schedule = _center_schedule()
+    migrated = _migrate_legacy_results(
+        depth=depth,
+        results_path=results_path,
+        allowed_actions=set(actions),
+    )
+
     run_config = {
         "checkpoint": str(checkpoint),
         "cloudict_exe": str(cloudict_exe),
@@ -173,12 +258,12 @@ def _run_center_stage(depth: int, stage_no: int, total_stages: int) -> None:
         "device": str(device),
         "board_size": BOARD_SIZE,
         "win_length": arena.WIN_LENGTH,
-        "forced_openings": len(CENTER_ACTIONS),
+        "opening_square_size": size,
+        "forced_openings": len(actions),
         "games_per_opening": 2,
         "games_total": len(schedule),
         "model_policy": "argmax",
-        "opening_mode": "center_3x3",
-        "opening_actions": list(CENTER_ACTIONS),
+        "opening_actions": list(actions),
     }
     arena._validate_run_config(config_path, run_config)
 
@@ -188,23 +273,22 @@ def _run_center_stage(depth: int, stage_no: int, total_stages: int) -> None:
         for item in schedule
         if (item[0], "BLACK" if item[1] else "WHITE") not in completed
     ]
-    coords = ", ".join(arena.action_to_cloudict(a) for a in CENTER_ACTIONS)
 
     print()
     print("#" * 78)
-    print(
-        f"ETAP {stage_no}/{total_stages} — CLOUDICT DEPTH {depth} — "
-        "SRODKOWE 3x3"
-    )
+    region = "PELNE 19x19" if size == 19 else f"SRODKOWE {size}x{size}"
+    print(f"ETAP {stage_no}/{total_stages} — CLOUDICT DEPTH {depth} — {region}")
     print("#" * 78)
     print(f"Checkpoint : {checkpoint}")
     print(f"Cloudict   : {cloudict_exe}")
     print(f"Depth      : {depth} | VCF={'ON' if vcf else 'OFF'}")
     print(
-        f"Test       : 9 pol startowych x 2 kolory = {len(schedule)} partii "
-        f"({len(remaining)} pozostalo)"
+        f"Test       : {len(actions)} pol startowych x 2 kolory = "
+        f"{len(schedule)} partii ({len(remaining)} pozostalo)"
     )
-    print(f"Starty     : {coords}")
+    print(f"Wyniki     : {output_dir}")
+    if migrated:
+        print(f"Migracja   : odzyskano {migrated} starych partii D{depth}")
     print("Model      : argmax, bez losowania")
 
     if not remaining:
@@ -213,8 +297,6 @@ def _run_center_stage(depth: int, stage_no: int, total_stages: int) -> None:
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         _print_stage_summary(summary, depth=depth)
-        print(f"CSV     : {results_path}")
-        print(f"Summary : {summary_path}")
         return
 
     agent = arena.CheckpointAgent(checkpoint, device)
@@ -245,7 +327,7 @@ def _run_center_stage(depth: int, stage_no: int, total_stages: int) -> None:
             draws = sum(r["result"] == "DRAW" for r in rows_now)
             losses = sum(r["result"] == "LOSS" for r in rows_now)
             print(
-                f"[D{depth} {game_index:2d}/{len(schedule)}] "
+                f"[D{depth} {game_index:3d}/{len(schedule)}] "
                 f"start={row['opening_coord']} model={row['model_color']:<5} "
                 f"-> {row['result']:<4} | W/D/L={wins}/{draws}/{losses} | "
                 f"stones={row['stones_played']} | "
@@ -262,22 +344,21 @@ def _run_center_stage(depth: int, stage_no: int, total_stages: int) -> None:
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     _print_stage_summary(summary, depth=depth)
-    print(f"CSV     : {results_path}")
-    print(f"Summary : {summary_path}")
 
 
 def _run_all_stages() -> None:
+    depths = tuple(STAGE_SIZES)
+    for stage_no, depth in enumerate(depths, start=1):
+        _run_stage(depth, stage_no, len(depths))
+
+    output_dir = Path(
+        _cli_value("--output-dir", str(DEFAULT_LADDER_OUTPUT_DIR))
+    ).resolve()
     print()
     print("#" * 78)
-    print("ETAP 1/3 — CLOUDICT DEPTH 2 — PELNE 19x19")
+    print("ARENA ZAKONCZONA — D2 + D3 + D4 + D5")
     print("#" * 78)
-    arena.main()
-    _run_center_stage(3, 2, 3)
-    _run_center_stage(4, 3, 3)
-    print()
-    print("#" * 78)
-    print("ARENA ZAKONCZONA — D2 + D3 + D4")
-    print("#" * 78)
+    print(f"Wszystkie wyniki: {output_dir}")
 
 
 if __name__ == "__main__":
