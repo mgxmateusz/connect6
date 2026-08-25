@@ -5,7 +5,15 @@ championship:
   temperature: 0.0
   device: "cuda"
 
+  # Etap 1: checkpointy są rozdzielane round-robin pomiędzy grupy:
+  # 1 -> I, 2 -> II, ..., 5 -> I itd. W każdej grupie każdy gra z każdym.
+  groups: 4
+  # Z każdej grupy przechodzi tylu najlepszych modeli. Finaliści grają następnie
+  # z całą pulą checkpointów; mecze już policzone w grupie nie są powtarzane.
+  advance_per_group: 200
+
   native_gpu:
     slots: 4096
     load_chunk_models: 32
+    progress_chunks: 100
     compile_verbose: true
