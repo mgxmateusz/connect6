@@ -24,8 +24,10 @@ constexpr int CONV_THREADS = WARP * WARPS_PER_BLOCK;
 constexpr int WM = 16;
 constexpr int WN = 16;
 constexpr int WK = 16;
-constexpr int MTILES = (HW + WM - 1) / WM;          // 23
-constexpr int MGROUPS = (MTILES + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK; // 6
+constexpr int MTILES = (HW + WM - 1) / WM;
+constexpr int MGROUPS = (MTILES + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+constexpr int GN_GROUP_C = 8;
+constexpr int GN_THREADS = 256;
 
 #define CUDA_CHECK(EXPR) do { \
     cudaError_t _e = (EXPR); \
@@ -71,9 +73,11 @@ __device__ __forceinline__ half canonical_input_value(
     int slots,
     const int8_t* current_player,
     const int8_t* stones_left) {
-    if (channel == 2) {
-        return __float2half(stones_left[slot] == 1 ? 1.0f : 0.0f);
-    }
+    // V6 input:
+    // 0 = moje kamienie, 1 = kamienie przeciwnika,
+    // 2 = maska prawdziwej planszy, 3 = stones_left == 1.
+    if (channel == 2) return __float2half(1.0f);
+    if (channel == 3) return __float2half(stones_left[slot] == 1 ? 1.0f : 0.0f);
     const bool black_to_move = current_player[slot] == 1;
     const int me_color = black_to_move ? 0 : 1;
     const int opp_color = black_to_move ? 1 : 0;
@@ -86,9 +90,7 @@ __device__ __forceinline__ float silu_fast(float x) {
     return x / (1.0f + __expf(-x));
 }
 
-// Four MMA warps process four spatial 16-position tiles of one slot and share
-// the same B tile. That gives one global/L2 weight load for four WMMA users.
-template<int COUT, int KH, int KPAD, int OPAD>
+template<int COUT, int KH, int KPAD, int OPAD, bool ACTIVATE>
 __global__ void conv_first_kernel(
     const int64_t* __restrict__ boards,
     const uint8_t* __restrict__ active,
@@ -97,7 +99,6 @@ __global__ void conv_first_kernel(
     const int32_t* __restrict__ black_model,
     const int32_t* __restrict__ white_model,
     const half* __restrict__ weights,
-    const half* __restrict__ bias,
     half* __restrict__ output,
     int slots) {
 
@@ -126,11 +127,10 @@ __global__ void conv_first_kernel(
     wmma::fragment<wmma::accumulator, WM, WN, WK, float> c_frag;
     wmma::fill_fragment(c_frag, 0.0f);
 
-    constexpr int KREAL = 3 * KH * KH;
+    constexpr int KREAL = 4 * KH * KH;
     constexpr int PAD = KH / 2;
 
     for (int k0 = 0; k0 < KPAD; k0 += WK) {
-        // Cooperative B load: shared layout is column-major KxN (row + col*16).
         for (int t = tid; t < WK * WN; t += CONV_THREADS) {
             const int row = t & 15;
             const int col = t >> 4;
@@ -182,16 +182,15 @@ __global__ void conv_first_kernel(
             const int pos = m0 + mr;
             const int oc = n0 + nc;
             if (pos < HW && oc < COUT) {
-                const float y = c_smem[warp][t]
-                    + __half2float(bias[static_cast<int64_t>(model) * OPAD + oc]);
+                const float y = c_smem[warp][t];
                 output[(static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + oc]
-                    = __float2half_rn(silu_fast(y));
+                    = __float2half_rn(ACTIVATE ? silu_fast(y) : y);
             }
         }
     }
 }
 
-template<int CIN, int COUT, int KH, int KPAD, int OPAD>
+template<int CIN, int COUT, int KH, int KPAD, int OPAD, bool ACTIVATE>
 __global__ void conv_hidden_kernel(
     const half* __restrict__ input,
     const uint8_t* __restrict__ active,
@@ -199,7 +198,6 @@ __global__ void conv_hidden_kernel(
     const int32_t* __restrict__ black_model,
     const int32_t* __restrict__ white_model,
     const half* __restrict__ weights,
-    const half* __restrict__ bias,
     half* __restrict__ output,
     int slots) {
 
@@ -283,12 +281,73 @@ __global__ void conv_hidden_kernel(
             const int pos = m0 + mr;
             const int oc = n0 + nc;
             if (pos < HW && oc < COUT) {
-                const float y = c_smem[warp][t]
-                    + __half2float(bias[static_cast<int64_t>(model) * OPAD + oc]);
+                const float y = c_smem[warp][t];
                 output[(static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + oc]
-                    = __float2half_rn(silu_fast(y));
+                    = __float2half_rn(ACTIVATE ? silu_fast(y) : y);
             }
         }
+    }
+}
+
+template<int C, int OPAD>
+__global__ void group_norm_silu_kernel(
+    half* __restrict__ features,
+    const uint8_t* __restrict__ active,
+    const int8_t* __restrict__ current_player,
+    const int32_t* __restrict__ black_model,
+    const int32_t* __restrict__ white_model,
+    const half* __restrict__ norm_weight,
+    const half* __restrict__ norm_bias,
+    int slots) {
+
+    constexpr int GROUPS = C / GN_GROUP_C;
+    constexpr int N = HW * GN_GROUP_C;
+    const int q = static_cast<int>(blockIdx.x);
+    const int group = q % GROUPS;
+    const int slot = q / GROUPS;
+    if (slot >= slots || !active[slot]) return;
+
+    const int tid = threadIdx.x;
+    const int model = actor_model(slot, current_player, black_model, white_model);
+    float sum = 0.0f;
+    float sumsq = 0.0f;
+    for (int e = tid; e < N; e += blockDim.x) {
+        const int pos = e / GN_GROUP_C;
+        const int c = group * GN_GROUP_C + (e % GN_GROUP_C);
+        const float v = __half2float(
+            features[(static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + c]);
+        sum += v;
+        sumsq = fmaf(v, v, sumsq);
+    }
+
+    __shared__ float red_sum[GN_THREADS];
+    __shared__ float red_sumsq[GN_THREADS];
+    red_sum[tid] = sum;
+    red_sumsq[tid] = sumsq;
+    __syncthreads();
+    for (int stride = GN_THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            red_sum[tid] += red_sum[tid + stride];
+            red_sumsq[tid] += red_sumsq[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    const float mean = red_sum[0] / static_cast<float>(N);
+    const float variance = fmaxf(
+        red_sumsq[0] / static_cast<float>(N) - mean * mean,
+        0.0f);
+    const float inv_std = rsqrtf(variance + 1.0e-5f);
+
+    for (int e = tid; e < N; e += blockDim.x) {
+        const int pos = e / GN_GROUP_C;
+        const int c = group * GN_GROUP_C + (e % GN_GROUP_C);
+        const int64_t offset = (static_cast<int64_t>(slot) * HW + pos) * STORAGE_C + c;
+        const float v = __half2float(features[offset]);
+        const float gamma = __half2float(norm_weight[static_cast<int64_t>(model) * OPAD + c]);
+        const float beta = __half2float(norm_bias[static_cast<int64_t>(model) * OPAD + c]);
+        const float y = (v - mean) * inv_std * gamma + beta;
+        features[offset] = __float2half_rn(silu_fast(y));
     }
 }
 
@@ -536,8 +595,12 @@ cudaGraphNode_t add_kernel_node(
     cudaGraph_t graph, cudaGraphNode_t dependency, void* func,
     dim3 grid, dim3 block, void** args) {
     cudaKernelNodeParams p{};
-    p.func = func; p.gridDim = grid; p.blockDim = block;
-    p.sharedMemBytes = 0; p.kernelParams = args; p.extra = nullptr;
+    p.func = func;
+    p.gridDim = grid;
+    p.blockDim = block;
+    p.sharedMemBytes = 0;
+    p.kernelParams = args;
+    p.extra = nullptr;
     cudaGraphNode_t node{};
     if (dependency) CUDA_CHECK(cudaGraphAddKernelNode(&node, graph, &dependency, 1, &p));
     else CUDA_CHECK(cudaGraphAddKernelNode(&node, graph, nullptr, 0, &p));
@@ -554,21 +617,24 @@ void check_half_cuda_contiguous(const torch::Tensor& t, const char* name) {
 
 std::vector<torch::Tensor> run_championship_cuda(
     std::vector<torch::Tensor> weights,
-    std::vector<torch::Tensor> biases,
+    std::vector<torch::Tensor> norm_weights,
+    std::vector<torch::Tensor> norm_biases,
     torch::Tensor policy_weight,
     torch::Tensor game_ids,
     int64_t num_models,
     int64_t slots64) {
 
-    TORCH_CHECK(weights.size() == 8 && biases.size() == 8,
-                "Native engine wymaga 8 warstw conv");
+    TORCH_CHECK(weights.size() == 8, "Native engine wymaga 8 warstw conv");
+    TORCH_CHECK(norm_weights.size() == 8 && norm_biases.size() == 8,
+                "Native engine wymaga 8 slotów parametrów norm");
     TORCH_CHECK(game_ids.is_cuda() && game_ids.scalar_type() == torch::kInt32 && game_ids.is_contiguous(),
                 "game_ids musi być CUDA int32 contiguous");
     TORCH_CHECK(num_models >= 2 && num_models <= 65535, "Niepoprawna liczba modeli");
     TORCH_CHECK(slots64 >= 32 && slots64 <= 32768, "slots musi być w zakresie 32..32768");
     for (int i = 0; i < 8; ++i) {
         check_half_cuda_contiguous(weights[i], "weights");
-        check_half_cuda_contiguous(biases[i], "biases");
+        check_half_cuda_contiguous(norm_weights[i], "norm_weights");
+        check_half_cuda_contiguous(norm_biases[i], "norm_biases");
     }
     check_half_cuda_contiguous(policy_weight, "policy_weight");
 
@@ -578,13 +644,15 @@ std::vector<torch::Tensor> run_championship_cuda(
     TORCH_CHECK(total > 0, "Brak gier do rozegrania");
 
     const int expected_o[8] = {32, 32, 64, 64, 64, 96, 96, 96};
-    const int expected_k[8] = {1600, 288, 288, 576, 576, 576, 864, 864};
+    const int expected_k[8] = {2128, 288, 288, 576, 576, 576, 864, 864};
     for (int i = 0; i < 8; ++i) {
         TORCH_CHECK(weights[i].dim() == 3 && weights[i].size(0) == models &&
                     weights[i].size(1) == expected_o[i] && weights[i].size(2) == expected_k[i],
                     "Niepoprawny packed weight w warstwie ", i);
-        TORCH_CHECK(biases[i].dim() == 2 && biases[i].size(0) == models &&
-                    biases[i].size(1) == expected_o[i], "Niepoprawny bias w warstwie ", i);
+        TORCH_CHECK(norm_weights[i].dim() == 2 && norm_weights[i].size(0) == models &&
+                    norm_weights[i].size(1) == expected_o[i], "Niepoprawny norm weight w warstwie ", i);
+        TORCH_CHECK(norm_biases[i].dim() == 2 && norm_biases[i].size(0) == models &&
+                    norm_biases[i].size(1) == expected_o[i], "Niepoprawny norm bias w warstwie ", i);
     }
     TORCH_CHECK(policy_weight.dim() == 2 && policy_weight.size(0) == models &&
                 policy_weight.size(1) == STORAGE_C, "policy_weight musi mieć [M,96]");
@@ -630,10 +698,11 @@ std::vector<torch::Tensor> run_championship_cuda(
     half* a_p = reinterpret_cast<half*>(feat_a.data_ptr<at::Half>());
     half* b_p = reinterpret_cast<half*>(feat_b.data_ptr<at::Half>());
 
-    std::vector<const half*> w(8), bs(8);
+    std::vector<const half*> w(8), nw(8), nb(8);
     for (int i = 0; i < 8; ++i) {
         w[i] = reinterpret_cast<const half*>(weights[i].data_ptr<at::Half>());
-        bs[i] = reinterpret_cast<const half*>(biases[i].data_ptr<at::Half>());
+        nw[i] = reinterpret_cast<const half*>(norm_weights[i].data_ptr<at::Half>());
+        nb[i] = reinterpret_cast<const half*>(norm_biases[i].data_ptr<at::Half>());
     }
     const half* policy_p = reinterpret_cast<const half*>(policy_weight.data_ptr<at::Half>());
 
@@ -660,44 +729,64 @@ std::vector<torch::Tensor> run_championship_cuda(
     cudaGraphNode_t dep{};
 
     {
-        void* args[] = {&boards_p,&active_p,&player_p,&stones_p,&black_p,&white_p,&w[0],&bs[0],&a_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_first_kernel<32,23,1600,32>,
+        void* args[] = {&boards_p,&active_p,&player_p,&stones_p,&black_p,&white_p,&w[0],&a_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_first_kernel<32,23,2128,32,false>,
                               dim3(slots*MGROUPS*2),dim3(CONV_THREADS),args);
     }
     {
-        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[1],&bs[1],&b_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<32,32,3,288,32>,
+        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&nw[0],&nb[0],&slots};
+        dep = add_kernel_node(body,dep,(void*)group_norm_silu_kernel<32,32>,
+                              dim3(slots*(32/GN_GROUP_C)),dim3(GN_THREADS),args);
+    }
+    {
+        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[1],&b_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<32,32,3,288,32,true>,
                               dim3(slots*MGROUPS*2),dim3(CONV_THREADS),args);
     }
     {
-        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&w[2],&bs[2],&a_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<32,64,3,288,64>,
+        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&w[2],&a_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<32,64,3,288,64,false>,
                               dim3(slots*MGROUPS*4),dim3(CONV_THREADS),args);
     }
     {
-        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[3],&bs[3],&b_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<64,64,3,576,64>,
+        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&nw[2],&nb[2],&slots};
+        dep = add_kernel_node(body,dep,(void*)group_norm_silu_kernel<64,64>,
+                              dim3(slots*(64/GN_GROUP_C)),dim3(GN_THREADS),args);
+    }
+    {
+        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[3],&b_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<64,64,3,576,64,true>,
                               dim3(slots*MGROUPS*4),dim3(CONV_THREADS),args);
     }
     {
-        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&w[4],&bs[4],&a_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<64,64,3,576,64>,
+        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&w[4],&a_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<64,64,3,576,64,true>,
                               dim3(slots*MGROUPS*4),dim3(CONV_THREADS),args);
     }
     {
-        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[5],&bs[5],&b_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<64,96,3,576,96>,
+        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[5],&b_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<64,96,3,576,96,false>,
                               dim3(slots*MGROUPS*6),dim3(CONV_THREADS),args);
     }
     {
-        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&w[6],&bs[6],&a_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<96,96,3,864,96>,
+        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&nw[5],&nb[5],&slots};
+        dep = add_kernel_node(body,dep,(void*)group_norm_silu_kernel<96,96>,
+                              dim3(slots*(96/GN_GROUP_C)),dim3(GN_THREADS),args);
+    }
+    {
+        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&w[6],&a_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<96,96,3,864,96,true>,
                               dim3(slots*MGROUPS*6),dim3(CONV_THREADS),args);
     }
     {
-        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[7],&bs[7],&b_p,&slots};
-        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<96,96,3,864,96>,
+        void* args[] = {&a_p,&active_p,&player_p,&black_p,&white_p,&w[7],&b_p,&slots};
+        dep = add_kernel_node(body,dep,(void*)conv_hidden_kernel<96,96,3,864,96,false>,
                               dim3(slots*MGROUPS*6),dim3(CONV_THREADS),args);
+    }
+    {
+        void* args[] = {&b_p,&active_p,&player_p,&black_p,&white_p,&nw[7],&nb[7],&slots};
+        dep = add_kernel_node(body,dep,(void*)group_norm_silu_kernel<96,96>,
+                              dim3(slots*(96/GN_GROUP_C)),dim3(GN_THREADS),args);
     }
     {
         void* args[] = {&b_p,&policy_p,&boards_p,&active_p,&player_p,&black_p,&white_p,&actions_p,&slots};
