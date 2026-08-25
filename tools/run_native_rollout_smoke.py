@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 import time
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import torch
 
@@ -16,7 +22,6 @@ def main() -> None:
     if torch.cuda.get_device_capability(device) != (12, 0):
         raise RuntimeError(f"Smoke test jest dla SM120; wykryto {torch.cuda.get_device_capability(device)}")
 
-    # Dokładnie jeden prawdziwy collect z train.yaml: 2048 * 384 pełnych pozycji.
     envs = 2048
     completed_positions_per_update = 384
     target = envs * completed_positions_per_update
@@ -37,7 +42,6 @@ def main() -> None:
         bot_v1_fraction=0.50,
     )
 
-    # Wykluczamy jednorazową kompilację V1/V2 z pomiaru collectora.
     collector._ext()
     torch.cuda.synchronize(device)
     started = time.perf_counter()
