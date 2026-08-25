@@ -1,6 +1,6 @@
 bot_arena:
-  checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
-  output_dir: "runs/connect6_cnn_01/bot_arena"
+  checkpoint_dir: "runs/connect6_5/checkpoints"
+  output_dir: "runs/connect6_cnn_05/bot_arena"
   device: "cuda"
 
   # Domyślnie każdy autosave gra z oboma stałymi botami.

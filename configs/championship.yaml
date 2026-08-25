@@ -1,6 +1,6 @@
 championship:
-  checkpoint_dir: "runs/connect6_cnn_01/checkpoints"
-  output_dir: "runs/connect6_cnn_01/championship"
+  checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
+  output_dir: "runs/connect6_cnn_05/championship"
   games_per_pair: 2
   temperature: 0.0
   device: "cuda"
