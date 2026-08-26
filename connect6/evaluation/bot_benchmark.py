@@ -5,7 +5,13 @@ from pathlib import Path
 
 import torch
 
-from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2
+from connect6.bots.gpu_bot import (
+    GPUTacticalBot,
+    GPUTacticalBotV2,
+    GPUTacticalBotV3,
+    GPUTacticalBotV4B4x4,
+    GPUTacticalBotV4B8x2,
+)
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
 from connect6.engine.vector_env import canonical_network_input
@@ -16,7 +22,11 @@ def _find_checkpoint(runs_dir: Path) -> Path:
     if latest:
         return max(latest, key=lambda p: p.stat().st_mtime)
 
-    versioned = list(runs_dir.rglob("checkpoints/model_update_*.pt")) if runs_dir.exists() else []
+    versioned = (
+        list(runs_dir.rglob("checkpoints/model_update_*.pt"))
+        if runs_dir.exists()
+        else []
+    )
     if versioned:
         return max(versioned, key=lambda p: p.stat().st_mtime)
     raise FileNotFoundError(
@@ -67,15 +77,56 @@ def _elapsed_ms(fn, warmup: int, iterations: int) -> float:
     return float(start.elapsed_time(end)) / iterations
 
 
+def _elapsed_search_avg_decision_ms(
+    bot,
+    boards: torch.Tensor,
+    players: torch.Tensor,
+    *,
+    warmup: int,
+    iterations: int,
+) -> float:
+    """Measure a planned two-stone turn and report average ms per decision.
+
+    Call #1 has stones_left=2 and performs the full search while caching stone #2.
+    Call #2 has stones_left=1 and returns the cached stone without another search.
+    The same board can be reused for timing because the cache path only needs the
+    cached action to remain legal; elapsed time is divided by two decisions.
+    """
+    left_two = torch.full(
+        (boards.shape[0],), 2, dtype=torch.int8, device=boards.device
+    )
+    left_one = torch.ones(
+        (boards.shape[0],), dtype=torch.int8, device=boards.device
+    )
+    bot.reset()
+
+    for _ in range(warmup):
+        bot.actions(boards, players, left_two)
+        bot.actions(boards, players, left_one)
+    torch.cuda.synchronize()
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(iterations):
+        bot.actions(boards, players, left_two)
+        bot.actions(boards, players, left_one)
+    end.record()
+    end.synchronize()
+
+    total_ms = float(start.elapsed_time(end))
+    return total_ms / (iterations * 2.0)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="GPU decision benchmark: CNN policy vs Tactical Bot V1/V2"
+        description="GPU decision benchmark: CNN vs Tactical Bot V1/V2/V3/V4"
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     parser.add_argument("--batch-sizes", default="1,32,128,256,512,1024,2048")
     parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--iters", type=int, default=500)
+    parser.add_argument("--iters", type=int, default=2000)
     parser.add_argument("--occupied", type=float, default=0.35)
     args = parser.parse_args()
 
@@ -87,20 +138,33 @@ def main() -> None:
     device = torch.device("cuda")
     checkpoint = args.checkpoint or _find_checkpoint(args.runs_dir)
     model, payload = load_model_for_inference(checkpoint, device)
+
     bot_v1 = GPUTacticalBot(device)
     bot_v2 = GPUTacticalBotV2(device)
+    bot_v3 = GPUTacticalBotV3(device)
+    bot_v4_8x2 = GPUTacticalBotV4B8x2(device)
+    bot_v4_4x4 = GPUTacticalBotV4B4x4(device)
 
     tr_cfg = payload.get("config", {}).get("training", {})
     amp_enabled = bool(tr_cfg.get("amp", True))
     amp_name = str(tr_cfg.get("amp_dtype", "bfloat16")).lower()
-    amp_dtype = torch.float16 if amp_name in {"float16", "fp16", "half"} else torch.bfloat16
+    amp_dtype = (
+        torch.float16
+        if amp_name in {"float16", "fp16", "half"}
+        else torch.bfloat16
+    )
 
-    # V1 and V2 share one native extension; compile/load it outside timings.
+    # Compile/load the shared native extension outside timings.
     seed_board = torch.zeros((1, 19, 19), dtype=torch.int8, device=device)
     seed_player = torch.ones(1, dtype=torch.int8, device=device)
-    seed_left = torch.ones(1, dtype=torch.int8, device=device)
-    bot_v1.actions(seed_board, seed_player, seed_left)
-    bot_v2.actions(seed_board, seed_player, seed_left)
+    seed_left_one = torch.ones(1, dtype=torch.int8, device=device)
+    seed_left_two = torch.full((1,), 2, dtype=torch.int8, device=device)
+    bot_v1.actions(seed_board, seed_player, seed_left_one)
+    bot_v2.actions(seed_board, seed_player, seed_left_one)
+    for bot in (bot_v3, bot_v4_8x2, bot_v4_4x4):
+        bot.reset()
+        bot.actions(seed_board, seed_player, seed_left_two)
+        bot.actions(seed_board, seed_player, seed_left_one)
     torch.cuda.synchronize()
 
     print(f"GPU: {torch.cuda.get_device_name(device)}")
@@ -109,13 +173,24 @@ def main() -> None:
         "CNN timing: board -> canonical input -> forward -> legal mask -> argmax "
         f"(autocast={'on' if amp_enabled else 'off'}, dtype={amp_name})"
     )
-    print("Bot timing: board -> one native CUDA scoring kernel -> argmax")
-    print()
+    print("V1/V2 timing: one native CUDA scoring decision.")
     print(
-        f"{'batch':>7} | {'CNN ms':>10} | {'V1 ms':>10} | {'V2 ms':>10} | "
-        f"{'V1 faster':>10} | {'V2 faster':>10} | {'V2/V1':>8} | {'V2 pos/s':>12}"
+        "V3/V4 timing: full search decision + cached second decision, "
+        "then total time / 2 (fair ms per played stone)."
     )
-    print("-" * 101)
+    print(
+        "Theoretical V2-score work per planned turn: "
+        "V3 D2[8]=9x; V4 D3[8,2]=25x; V4 D3[4,4]=21x. "
+        "Averaged over the cached second stone: 4.5x / 12.5x / 10.5x per decision."
+    )
+    print()
+
+    print(
+        f"{'batch':>6} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
+        f"{'V3 D2[8]':>10} | {'V4 D3[8,2]':>12} | {'V4 D3[4,4]':>12} | "
+        f"{'V3/V2':>7} | {'V4a/V2':>7} | {'V4b/V2':>7}"
+    )
+    print("-" * 113)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left = _make_positions(batch, device, args.occupied)
@@ -141,14 +216,33 @@ def main() -> None:
         model_ms = _elapsed_ms(model_decision, args.warmup, args.iters)
         v1_ms = _elapsed_ms(bot_v1_decision, args.warmup, args.iters)
         v2_ms = _elapsed_ms(bot_v2_decision, args.warmup, args.iters)
-        v1_speedup = model_ms / v1_ms if v1_ms > 0 else float("inf")
-        v2_speedup = model_ms / v2_ms if v2_ms > 0 else float("inf")
-        v2_over_v1 = v2_ms / v1_ms if v1_ms > 0 else float("inf")
-        v2_rate = batch * 1000.0 / v2_ms
+        v3_ms = _elapsed_search_avg_decision_ms(
+            bot_v3,
+            boards,
+            players,
+            warmup=args.warmup,
+            iterations=args.iters,
+        )
+        v4a_ms = _elapsed_search_avg_decision_ms(
+            bot_v4_8x2,
+            boards,
+            players,
+            warmup=args.warmup,
+            iterations=args.iters,
+        )
+        v4b_ms = _elapsed_search_avg_decision_ms(
+            bot_v4_4x4,
+            boards,
+            players,
+            warmup=args.warmup,
+            iterations=args.iters,
+        )
 
         print(
-            f"{batch:7d} | {model_ms:10.4f} | {v1_ms:10.4f} | {v2_ms:10.4f} | "
-            f"{v1_speedup:9.2f}x | {v2_speedup:9.2f}x | {v2_over_v1:8.2f} | {v2_rate:12,.0f}"
+            f"{batch:6d} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
+            f"{v3_ms:10.4f} | {v4a_ms:12.4f} | {v4b_ms:12.4f} | "
+            f"{v3_ms / v2_ms:7.2f} | {v4a_ms / v2_ms:7.2f} | "
+            f"{v4b_ms / v2_ms:7.2f}"
         )
 
 
