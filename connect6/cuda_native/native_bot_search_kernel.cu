@@ -9,7 +9,7 @@ constexpr int CELLS = BOARD * BOARD;
 constexpr int THREADS = 256;
 constexpr int WIN = 6;
 constexpr int MAX_ROOT = 8;
-constexpr int MAX_PAIRS = 16;
+constexpr int MAX_PAIRS = 32;
 constexpr int INVALID_SCORE = INT_MIN / 4;
 constexpr int WIN_SCORE = 1000000000;
 
@@ -320,6 +320,10 @@ __global__ void tactical_search_kernel(
     int16_t* __restrict__ pending_second,
     int64_t* __restrict__ actions,
     int batch) {
+    static_assert(ROOT_K <= MAX_ROOT, "ROOT_K exceeds shared root capacity");
+    static_assert(!DEPTH3 || ROOT_K * SECOND_K <= MAX_PAIRS,
+                  "search beam exceeds shared pair capacity");
+
     const int board_id = blockIdx.x;
     if (board_id >= batch) return;
 
@@ -380,7 +384,7 @@ __global__ void tactical_search_kernel(
     __syncthreads();
 
     // Ply 2: after every retained first stone, score all legal second stones.
-    // V3 keeps only the best second stone per root. V4 keeps SECOND_K.
+    // V3 keeps only the best second stone per root. V4/V5 keep SECOND_K.
     #pragma unroll
     for (int r = 0; r < ROOT_K; ++r) {
         const int first = root_actions[r];
@@ -605,7 +609,7 @@ extern "C" cudaError_t launch_tactical_bot_v4_8x2_cuda(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t launch_tactical_bot_v4_4x4_cuda(
+extern "C" cudaError_t launch_tactical_bot_v5_8x4_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -614,7 +618,7 @@ extern "C" cudaError_t launch_tactical_bot_v4_4x4_cuda(
     int batch,
     cudaStream_t stream) {
     if (batch <= 0) return cudaSuccess;
-    tactical_search_kernel<4, 4, true><<<batch, THREADS, 0, stream>>>(
+    tactical_search_kernel<8, 4, true><<<batch, THREADS, 0, stream>>>(
         boards, current_player, stones_left, pending_second, actions, batch);
     return cudaGetLastError();
 }
