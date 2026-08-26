@@ -149,11 +149,11 @@ class GPUTacticalBotV4B8x2(_SearchGPUTacticalBot):
     label = "GPU Tactical Bot V4 D3 B8x2"
 
 
-class GPUTacticalBotV4B4x4(_SearchGPUTacticalBot):
-    """V4 alternate: V2 scorer, depth 3, beams [4, 4]."""
+class GPUTacticalBotV5B8x4(_SearchGPUTacticalBot):
+    """V5: V2 scorer, depth 3, beams [8, 4], one-ply opponent minimax."""
 
-    entrypoint = "tactical_bot_v4_4x4_actions"
-    label = "GPU Tactical Bot V4 D3 B4x4"
+    entrypoint = "tactical_bot_v5_8x4_actions"
+    label = "GPU Tactical Bot V5 D3 B8x4"
 
 
 def create_gpu_tactical_bot(
@@ -162,7 +162,7 @@ def create_gpu_tactical_bot(
     *,
     verbose_build: bool = False,
 ) -> _BaseGPUTacticalBot:
-    # V3/V4 are intentionally not wired into training/UI yet; they are
+    # V3/V4/V5 are intentionally not wired into training/UI yet; they are
     # benchmark prototypes until their speed/strength is measured.
     if label == GPU_TACTICAL_BOT:
         return GPUTacticalBot(device, verbose_build=verbose_build)
