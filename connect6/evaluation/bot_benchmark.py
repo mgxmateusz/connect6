@@ -75,7 +75,7 @@ def main() -> None:
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     parser.add_argument("--batch-sizes", default="1,32,128,256,512,2048")
     parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--iters", type=int, default=2000)
+    parser.add_argument("--iters", type=int, default=500)
     parser.add_argument("--occupied", type=float, default=0.35)
     args = parser.parse_args()
 
