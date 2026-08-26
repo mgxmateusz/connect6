@@ -13,7 +13,7 @@ from .vector_env import VectorConnect6
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark wektorowego środowiska Connect6 i inference modelu")
     parser.add_argument("--config", default="configs/train.yaml")
-    parser.add_argument("--steps", type=int, default=2000)
+    parser.add_argument("--steps", type=int, default=500)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
