@@ -9,8 +9,8 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV3,
-    GPUTacticalBotV4B4x4,
     GPUTacticalBotV4B8x2,
+    GPUTacticalBotV5B8x4,
 )
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
@@ -120,7 +120,7 @@ def _elapsed_search_avg_decision_ms(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="GPU decision benchmark: CNN vs Tactical Bot V1/V2/V3/V4"
+        description="GPU decision benchmark: CNN vs Tactical Bot V1/V2/V3/V4/V5"
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
@@ -142,8 +142,8 @@ def main() -> None:
     bot_v1 = GPUTacticalBot(device)
     bot_v2 = GPUTacticalBotV2(device)
     bot_v3 = GPUTacticalBotV3(device)
-    bot_v4_8x2 = GPUTacticalBotV4B8x2(device)
-    bot_v4_4x4 = GPUTacticalBotV4B4x4(device)
+    bot_v4 = GPUTacticalBotV4B8x2(device)
+    bot_v5 = GPUTacticalBotV5B8x4(device)
 
     tr_cfg = payload.get("config", {}).get("training", {})
     amp_enabled = bool(tr_cfg.get("amp", True))
@@ -161,7 +161,7 @@ def main() -> None:
     seed_left_two = torch.full((1,), 2, dtype=torch.int8, device=device)
     bot_v1.actions(seed_board, seed_player, seed_left_one)
     bot_v2.actions(seed_board, seed_player, seed_left_one)
-    for bot in (bot_v3, bot_v4_8x2, bot_v4_4x4):
+    for bot in (bot_v3, bot_v4, bot_v5):
         bot.reset()
         bot.actions(seed_board, seed_player, seed_left_two)
         bot.actions(seed_board, seed_player, seed_left_one)
@@ -175,20 +175,20 @@ def main() -> None:
     )
     print("V1/V2 timing: one native CUDA scoring decision.")
     print(
-        "V3/V4 timing: full search decision + cached second decision, "
+        "V3/V4/V5 timing: full search decision + cached second decision, "
         "then total time / 2 (fair ms per played stone)."
     )
     print(
         "Theoretical V2-score work per planned turn: "
-        "V3 D2[8]=9x; V4 D3[8,2]=25x; V4 D3[4,4]=21x. "
-        "Averaged over the cached second stone: 4.5x / 12.5x / 10.5x per decision."
+        "V3 D2[8]=9x; V4 D3[8,2]=25x; V5 D3[8,4]=41x. "
+        "Averaged over the cached second stone: 4.5x / 12.5x / 20.5x per decision."
     )
     print()
 
     print(
         f"{'batch':>6} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
-        f"{'V3 D2[8]':>10} | {'V4 D3[8,2]':>12} | {'V4 D3[4,4]':>12} | "
-        f"{'V3/V2':>7} | {'V4a/V2':>7} | {'V4b/V2':>7}"
+        f"{'V3 D2[8]':>10} | {'V4 D3[8,2]':>12} | {'V5 D3[8,4]':>12} | "
+        f"{'V3/CNN':>7} | {'V4/CNN':>7} | {'V5/CNN':>7}"
     )
     print("-" * 113)
 
@@ -223,15 +223,15 @@ def main() -> None:
             warmup=args.warmup,
             iterations=args.iters,
         )
-        v4a_ms = _elapsed_search_avg_decision_ms(
-            bot_v4_8x2,
+        v4_ms = _elapsed_search_avg_decision_ms(
+            bot_v4,
             boards,
             players,
             warmup=args.warmup,
             iterations=args.iters,
         )
-        v4b_ms = _elapsed_search_avg_decision_ms(
-            bot_v4_4x4,
+        v5_ms = _elapsed_search_avg_decision_ms(
+            bot_v5,
             boards,
             players,
             warmup=args.warmup,
@@ -240,9 +240,9 @@ def main() -> None:
 
         print(
             f"{batch:6d} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
-            f"{v3_ms:10.4f} | {v4a_ms:12.4f} | {v4b_ms:12.4f} | "
-            f"{v3_ms / v2_ms:7.2f} | {v4a_ms / v2_ms:7.2f} | "
-            f"{v4b_ms / v2_ms:7.2f}"
+            f"{v3_ms:10.4f} | {v4_ms:12.4f} | {v5_ms:12.4f} | "
+            f"{v3_ms / model_ms:7.3f} | {v4_ms / model_ms:7.3f} | "
+            f"{v5_ms / model_ms:7.3f}"
         )
 
 
