@@ -94,6 +94,7 @@ class _SearchGPUTacticalBot(_BaseGPUTacticalBot):
         super().__init__(device, verbose_build=verbose_build)
         self._pending_second: torch.Tensor | None = None
 
+    @torch.inference_mode()
     def reset(self) -> None:
         if self._pending_second is not None:
             self._pending_second.fill_(-1)
