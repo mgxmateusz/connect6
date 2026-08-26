@@ -38,7 +38,7 @@ extern "C" cudaError_t launch_tactical_bot_v4_8x2_cuda(
     int batch,
     cudaStream_t stream);
 
-extern "C" cudaError_t launch_tactical_bot_v4_4x4_cuda(
+extern "C" cudaError_t launch_tactical_bot_v5_8x4_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -235,7 +235,7 @@ torch::Tensor tactical_bot_v4_8x2_actions(
 }
 
 
-torch::Tensor tactical_bot_v4_4x4_actions(
+torch::Tensor tactical_bot_v5_8x4_actions(
     torch::Tensor boards,
     torch::Tensor current_player,
     torch::Tensor stones_left,
@@ -245,8 +245,8 @@ torch::Tensor tactical_bot_v4_4x4_actions(
         current_player,
         stones_left,
         pending_second,
-        launch_tactical_bot_v4_4x4_cuda,
-        "GPU Tactical Bot V4 D3 B4x4");
+        launch_tactical_bot_v5_8x4_cuda,
+        "GPU Tactical Bot V5 D3 B8x4");
 }
 
 
@@ -268,7 +268,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &tactical_bot_v4_8x2_actions,
         "Connect6 GPU Tactical Bot V4 depth-3 beam-8x2 actions");
     m.def(
-        "tactical_bot_v4_4x4_actions",
-        &tactical_bot_v4_4x4_actions,
-        "Connect6 GPU Tactical Bot V4 depth-3 beam-4x4 actions");
+        "tactical_bot_v5_8x4_actions",
+        &tactical_bot_v5_8x4_actions,
+        "Connect6 GPU Tactical Bot V5 depth-3 beam-8x4 actions");
 }
