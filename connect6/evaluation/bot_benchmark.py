@@ -5,10 +5,10 @@ from pathlib import Path
 
 import torch
 
-from .checkpoint import load_model_for_inference
-from .gpu_bot import GPUTacticalBot, GPUTacticalBotV2
-from .model import mask_logits
-from .vector_env import canonical_network_input
+from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2
+from connect6.engine.checkpoint import load_model_for_inference
+from connect6.engine.model import mask_logits
+from connect6.engine.vector_env import canonical_network_input
 
 
 def _find_checkpoint(runs_dir: Path) -> Path:
