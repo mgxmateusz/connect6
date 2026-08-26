@@ -43,10 +43,10 @@ def load_native_bot_extension(*, verbose: bool = False):
         str(root / "native_bot_search_kernel.cu"),
     ]
 
-    # v5 adds the V3/V4 search kernels while preserving V1/V2 unchanged.
+    # v6 replaces the old V4 4x4 prototype with V5 depth-3 beam 8x4.
     # CUDA translation units intentionally contain no Torch headers; this avoids
     # the NVCC/MSVC ambiguity seen on CUDA 12.9 + Windows.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v5"
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v6"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,7 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use compiles V1/V2 + V3/V4 search CUDA kernels; "
+        "[BOT BUILD] First use compiles V1/V2 + V3/V4/V5 search CUDA kernels; "
         "later runs use the cache.",
         flush=True,
     )
