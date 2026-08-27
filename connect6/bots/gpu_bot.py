@@ -8,7 +8,7 @@ from .cuda_native.bot_loader import load_native_bot_extension
 GPU_TACTICAL_BOT = "GPU Tactical Bot V1"
 GPU_TACTICAL_BOT_V2 = "GPU Tactical Bot V2"
 GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Top16 Pair-State"
-GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top12 Reply4"
+GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top12 ReplyPair4"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -139,13 +139,13 @@ class GPUTacticalBotV3(_SearchGPUTacticalBot):
 
 
 class GPUTacticalBotV4(_SearchGPUTacticalBot):
-    """V4: TOP12 own-pair search plus V2-filtered opponent replies.
+    """V4: TOP12 own pairs plus filtered full opponent turns.
 
     One V2 pass keeps the 12 strongest current-position cells. All C(12,2)=66
     own pairs are state-evaluated and the best four continue. For each own pair,
-    V2 is run from the opponent's perspective at stones_left=2; only its TOP4
-    single-stone replies receive the full state evaluator. V4 then chooses the
-    own pair with the best worst-case result among those filtered replies.
+    V2 ranks the opponent's legal cells and keeps its TOP4. All C(4,2)=6 unordered
+    two-stone opponent reply pairs are then state-evaluated. V4 chooses the own
+    pair with the best worst-case result after a complete opponent turn.
     """
 
     entrypoint = "tactical_bot_v4_actions"
