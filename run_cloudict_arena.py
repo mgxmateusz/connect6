@@ -13,7 +13,7 @@ RECOVERABLE_MARKERS = (
     "Cloudict zakonczyl sie",
     "Przekroczono limit czasu oczekiwania na Cloudicta",
 )
-MAX_RESTARTS = 20
+MAX_RESTARTS = 1000
 BOARD_SIZE = 19
 _PROTOCOL_SYMMETRY = 0
 
