@@ -1,10 +1,10 @@
 bot_strength_arena:
   checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
-  output_dir: "runs/connect6_cnn_05/bot_strength_arena_v3_top16_v4_reply1"
+  output_dir: "runs/connect6_cnn_05/bot_strength_arena_v3_top16_v4_reply1_top3"
   device: "cuda"
 
   # V3 = former V4: TOP16 current-position cells -> all 120 own pairs, no reply.
-  # V4 = TOP8 -> 28 own pairs -> TOP4 -> every legal one-stone opponent reply.
+  # V4 = TOP8 -> 28 own pairs -> TOP3 -> every legal one-stone opponent reply.
   bots: ["v1", "v2", "v3", "v4"]
 
   # Etap 1 FAST: checkpointy są pakowane raz do natywnego layoutu FP16/WMMA.
@@ -16,14 +16,15 @@ bot_strength_arena:
   bot_vs_bot:
     opening_size: 19
 
-  # Etap 3: każdy bot osobno przeciw Cloudictowi na D2, D3 i D4.
+  # Etap 3: każdy bot vs Cloudict D2/D3/D4 tylko na środkowym 3x3:
+  # 9 otwarć x 2 kolory = 18 gier na depth i bota.
   cloudict:
     executable: "C:\\PRACA\\ConnectMore\\engines\\cloudict.exe"
     depths: [2, 3, 4]
     opening_sizes:
-      2: 19
-      3: 9
-      4: 5
+      2: 3
+      3: 3
+      4: 3
     vcf: false
     timeout_seconds: 60.0
     max_restarts: 20
