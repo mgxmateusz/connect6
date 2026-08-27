@@ -13,7 +13,7 @@ from connect6.bots.gpu_bot import (
 )
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
-from connect6.engine.vector_env import canonical_network_input
+from connect6.engine.vector_env import VectorConnect6, canonical_network_input
 
 
 def _find_checkpoint(runs_dir: Path) -> Path:
@@ -40,25 +40,116 @@ def _parse_batch_sizes(raw: str) -> list[int]:
     return result
 
 
-def _make_positions(batch: int, device: torch.device, occupied_fraction: float):
-    rnd = torch.rand((batch, 19, 19), device=device)
-    half = occupied_fraction * 0.5
-    boards = torch.zeros((batch, 19, 19), dtype=torch.int8, device=device)
-    boards[rnd < half] = 1
-    boards[(rnd >= half) & (rnd < occupied_fraction)] = -1
-    boards[:, 9, 9] = 0
-    ids = torch.arange(batch, device=device)
-    current_player = torch.where(
-        ids.remainder(2).eq(0),
-        torch.ones_like(ids, dtype=torch.int8),
-        -torch.ones_like(ids, dtype=torch.int8),
+def _validate_stone_range(min_stones: int, max_stones: int) -> None:
+    if min_stones < 1 or max_stones >= 361 or min_stones > max_stones:
+        raise ValueError("stone range must satisfy 1 <= min <= max < 361")
+    # A completed Connect6 turn starts after 1 + 2*n stones, hence an odd count.
+    if min_stones % 2 == 0 or max_stones % 2 == 0:
+        raise ValueError("--min-stones and --max-stones must be odd turn-start counts")
+
+
+def _sample_turn_start_targets(
+    count: int,
+    device: torch.device,
+    min_stones: int,
+    max_stones: int,
+) -> torch.Tensor:
+    min_turn = (min_stones - 1) // 2
+    max_turn = (max_stones - 1) // 2
+    turns = torch.randint(
+        min_turn,
+        max_turn + 1,
+        (count,),
+        dtype=torch.int16,
+        device=device,
     )
-    stones_left = torch.where(
-        ids.remainder(3).eq(0),
-        torch.ones_like(ids, dtype=torch.int8),
-        torch.full_like(ids, 2, dtype=torch.int8),
+    return turns * 2 + 1
+
+
+@torch.no_grad()
+def _make_legal_positions(
+    batch: int,
+    device: torch.device,
+    min_stones: int,
+    max_stones: int,
+    seed: int,
+):
+    """Generate legal, non-terminal Connect6 positions at a two-stone turn start.
+
+    Positions come from actual VectorConnect6 trajectories. Random legal actions
+    are played under the normal 1-stone opening / 2-stone turn rules. If a game
+    ends before its sampled target move count, that environment is restarted.
+    A position is captured only when it is live, stones_left == 2, and therefore
+    contains no already-completed six.
+    """
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    env = VectorConnect6(
+        num_envs=batch,
+        board_size=19,
+        win_length=6,
+        device=device,
+        debug_checks=False,
     )
-    return boards, current_player, stones_left
+
+    targets = _sample_turn_start_targets(
+        batch, device, min_stones, max_stones
+    )
+    captured = torch.zeros(batch, dtype=torch.bool, device=device)
+    out_boards = torch.empty_like(env.boards)
+    out_players = torch.empty_like(env.current_player)
+    out_counts = torch.empty(batch, dtype=torch.int16, device=device)
+
+    # Random legal trajectories can occasionally terminate early; restarts keep
+    # generating until every requested benchmark position is live at its target.
+    max_generation_steps = max(4096, max_stones * 40)
+    for _ in range(max_generation_steps):
+        legal = env.legal_mask()
+        # i.i.d. random scores + argmax is a uniform random choice over legal cells.
+        random_scores = torch.rand(
+            (batch, env.action_size), dtype=torch.float32, device=device
+        )
+        random_scores.masked_fill_(~legal, -1.0)
+        actions = random_scores.argmax(dim=1)
+
+        step = env.step(actions)
+
+        ready = (
+            ~captured
+            & ~step.done
+            & env.move_count.eq(targets)
+            & env.stones_left.eq(2)
+        )
+        if bool(ready.any()):
+            out_boards[ready] = env.boards[ready]
+            out_players[ready] = env.current_player[ready]
+            out_counts[ready] = env.move_count[ready]
+            captured[ready] = True
+
+        if bool(captured.all()):
+            break
+
+        if bool(step.done.any()):
+            reset_idx = torch.nonzero(step.done, as_tuple=False).flatten()
+            env.reset(reset_idx)
+            retry = step.done & ~captured
+            if bool(retry.any()):
+                retry_idx = torch.nonzero(retry, as_tuple=False).flatten()
+                targets[retry_idx] = _sample_turn_start_targets(
+                    int(retry_idx.numel()), device, min_stones, max_stones
+                )
+    else:
+        missing = int((~captured).sum().item())
+        raise RuntimeError(
+            f"Could not generate {missing}/{batch} legal benchmark positions"
+        )
+
+    stones_left = torch.full(
+        (batch,), 2, dtype=torch.int8, device=device
+    )
+    return out_boards, out_players, stones_left, out_counts
 
 
 def _elapsed_ms(fn, warmup: int, iterations: int) -> float:
@@ -113,20 +204,31 @@ def _elapsed_search_avg_decision_ms(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="GPU decision benchmark: CNN vs Tactical Bot V1/V2/V3/V4"
+        description="GPU decision benchmark on legal non-terminal Connect6 positions"
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     parser.add_argument("--batch-sizes", default="1,32,128,256,512,1024,2048")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=2000)
-    parser.add_argument("--occupied", type=float, default=0.35)
+    parser.add_argument(
+        "--min-stones",
+        type=int,
+        default=41,
+        help="Minimum odd stone count at the start of a full two-stone turn.",
+    )
+    parser.add_argument(
+        "--max-stones",
+        type=int,
+        default=81,
+        help="Maximum odd stone count at the start of a full two-stone turn.",
+    )
+    parser.add_argument("--position-seed", type=int, default=12345)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
         raise RuntimeError("This benchmark requires CUDA")
-    if not (0.0 <= args.occupied < 1.0):
-        raise ValueError("--occupied must be in [0, 1)")
+    _validate_stone_range(args.min_stones, args.max_stones)
 
     device = torch.device("cuda")
     checkpoint = args.checkpoint or _find_checkpoint(args.runs_dir)
@@ -161,10 +263,14 @@ def main() -> None:
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"Checkpoint: {checkpoint}")
     print(
+        "Positions: legal random VectorConnect6 trajectories, non-terminal, "
+        f"captured at full-turn start with {args.min_stones}-{args.max_stones} stones."
+    )
+    print(
         "CNN timing: board -> canonical input -> forward -> legal mask -> argmax "
         f"(autocast={'on' if amp_enabled else 'off'}, dtype={amp_name})"
     )
-    print("V1/V2 timing: one native CUDA scoring decision.")
+    print("V1/V2 timing: one native CUDA scoring decision at stones_left=2.")
     print("V3: TOP16 current cells -> all C(16,2)=120 pair states; no reply search.")
     print(
         "V4: TOP8 current cells -> all C(8,2)=28 pair states -> TOP4 pairs -> "
@@ -178,15 +284,26 @@ def main() -> None:
     print()
 
     print(
-        f"{'batch':>6} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
+        f"{'batch':>6} | {'stones':>11} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
         f"{'V3 Top16':>10} | {'V4 Reply1':>10} | {'V1/CNN':>7} | "
         f"{'V2/CNN':>7} | {'V3/CNN':>7} | {'V4/CNN':>7}"
     )
-    print("-" * 112)
+    print("-" * 126)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
-        boards, players, left = _make_positions(batch, device, args.occupied)
+        boards, players, left, stone_counts = _make_legal_positions(
+            batch,
+            device,
+            args.min_stones,
+            args.max_stones,
+            args.position_seed + batch,
+        )
         legal = boards.view(batch, -1).eq(0)
+
+        min_count = int(stone_counts.min().item())
+        max_count = int(stone_counts.max().item())
+        mean_count = float(stone_counts.float().mean().item())
+        stone_label = f"{min_count}-{max_count}/{mean_count:.0f}"
 
         def model_decision():
             network_input = canonical_network_input(boards, players, left)
@@ -224,10 +341,10 @@ def main() -> None:
         )
 
         print(
-            f"{batch:6d} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
-            f"{v3_ms:10.4f} | {v4_ms:10.4f} | {v1_ms / model_ms:7.3f} | "
-            f"{v2_ms / model_ms:7.3f} | {v3_ms / model_ms:7.3f} | "
-            f"{v4_ms / model_ms:7.3f}"
+            f"{batch:6d} | {stone_label:>11} | {model_ms:9.4f} | {v1_ms:8.4f} | "
+            f"{v2_ms:8.4f} | {v3_ms:10.4f} | {v4_ms:10.4f} | "
+            f"{v1_ms / model_ms:7.3f} | {v2_ms / model_ms:7.3f} | "
+            f"{v3_ms / model_ms:7.3f} | {v4_ms / model_ms:7.3f}"
         )
 
 
