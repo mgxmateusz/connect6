@@ -165,21 +165,24 @@ def main() -> None:
         f"(autocast={'on' if amp_enabled else 'off'}, dtype={amp_name})"
     )
     print("V1/V2 timing: one native CUDA scoring decision.")
-    print("V3: TOP8xTOP4 own pairs -> state TOP4 -> full opponent 4x2 replies.")
-    print("V4: one TOP16 candidate pass -> all C(16,2)=120 pair states; no opponent reply.")
+    print("V3: TOP16 current cells -> all C(16,2)=120 pair states; no reply search.")
     print(
-        "V3 worst-case heavy V2 work: 29 score_all passes + state evals. "
-        "V4 heavy V2 work: only 1 score_all pass + 120 state evals."
+        "V4: TOP8 current cells -> all C(8,2)=28 pair states -> TOP4 pairs -> "
+        "every legal one-stone opponent reply -> maximin."
+    )
+    print(
+        "V3 work: 1 score_all + 120 state evals. V4 work: 1 score_all + 28 own "
+        "state evals + up to 4*(legal opponent cells) reply state evals."
     )
     print("Ratios are always bot_ms / CNN_ms; lower is faster relative to CNN.")
     print()
 
     print(
         f"{'batch':>6} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
-        f"{'V3 FullTurn':>11} | {'V4 Top16':>10} | {'V1/CNN':>7} | "
+        f"{'V3 Top16':>10} | {'V4 Reply1':>10} | {'V1/CNN':>7} | "
         f"{'V2/CNN':>7} | {'V3/CNN':>7} | {'V4/CNN':>7}"
     )
-    print("-" * 113)
+    print("-" * 112)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left = _make_positions(batch, device, args.occupied)
@@ -222,7 +225,7 @@ def main() -> None:
 
         print(
             f"{batch:6d} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
-            f"{v3_ms:11.4f} | {v4_ms:10.4f} | {v1_ms / model_ms:7.3f} | "
+            f"{v3_ms:10.4f} | {v4_ms:10.4f} | {v1_ms / model_ms:7.3f} | "
             f"{v2_ms / model_ms:7.3f} | {v3_ms / model_ms:7.3f} | "
             f"{v4_ms / model_ms:7.3f}"
         )
