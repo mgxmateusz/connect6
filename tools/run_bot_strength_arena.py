@@ -14,6 +14,7 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBotFullPair,
     GPUTacticalBotPairFirst,
     GPUTacticalBotLiveRoad,
+    GPUTacticalBotHybrid,
 )
 from connect6.championship import bot_arena as _model_arena
 from connect6.championship import championship as _legacy
@@ -35,9 +36,9 @@ def _discover_even_checkpoints(directory):
 _legacy.discover_checkpoints = _discover_even_checkpoints
 
 
-# All registered bots below are normal arena participants. The config decides
-# which ones run through the same three stages: CNN gauntlet, full round-robin,
-# then Cloudict. Small TOP12 is intentionally no longer part of this test set.
+# All registered bots below are normal arena participants. The arena is
+# resumable: existing per-bot CNN rows, bot-vs-bot pairs and Cloudict games are
+# skipped, so adding a new bot only fills the missing work in the same output.
 _base.BOT_SPECS = (
     _model_arena.BotSpec(
         "v1",
@@ -68,6 +69,12 @@ _base.BOT_SPECS = (
         "GPU Tactical Bot PairFirst AllPairs P128",
         "gpu_tactical_bot_pairfirst_allpairs_p128_v1",
         GPUTacticalBotPairFirst,
+    ),
+    _model_arena.BotSpec(
+        "hybrid",
+        "GPU Tactical Bot Hybrid LiveRoad Pair128",
+        "gpu_tactical_bot_hybrid_liveroad_pair128_v1",
+        GPUTacticalBotHybrid,
     ),
     _model_arena.BotSpec(
         "live",
