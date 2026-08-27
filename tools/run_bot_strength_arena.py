@@ -12,6 +12,7 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBotV3,
     GPUTacticalBotSmall,
     GPUTacticalBotV4,
+    GPUTacticalBotFullPair,
 )
 from connect6.championship import bot_arena as _model_arena
 from connect6.evaluation import bot_strength_arena as _base
@@ -48,6 +49,14 @@ _base.BOT_SPECS = (
         "GPU Tactical Bot V4 Top12 ReplyPair6",
         "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1",
         GPUTacticalBotV4,
+    ),
+    # Benchmark/reference only. Not enabled in the default config because it
+    # evaluates every legal C(E,2) pair and is intentionally very expensive.
+    _model_arena.BotSpec(
+        "full",
+        "GPU Tactical Bot Full Pair Brute Force",
+        "gpu_tactical_bot_full_pair_bruteforce_v1",
+        GPUTacticalBotFullPair,
     ),
 )
 _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
