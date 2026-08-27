@@ -259,18 +259,18 @@ def main() -> None:
     print("V3: TOP16 current cells -> all C(16,2)=120 pair states; no reply search.")
     print(
         "V4: TOP12 current cells -> all C(12,2)=66 pair states -> TOP4 own pairs -> "
-        "for each pair opponent V2 TOP4 single replies -> exact reply state eval -> maximin."
+        "for each pair opponent V2 TOP4 cells -> all C(4,2)=6 full reply pairs -> maximin."
     )
     print(
         "V3 work: 1 score_all + 120 state evals. V4 work: 1 own score_all + 66 own "
-        "state evals + 4 opponent score_all + up to 4*4=16 reply state evals."
+        "state evals + 4 opponent score_all + up to 4*6=24 reply state evals = 90 state evals."
     )
     print("Ratios are always bot_ms / CNN_ms; lower is faster relative to CNN.")
     print()
 
     print(
         f"{'batch':>6} | {'stones':>11} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
-        f"{'V3 Top16':>10} | {'V4 T12/R4':>10} | {'V1/CNN':>7} | "
+        f"{'V3 Top16':>10} | {'V4 T12/P4':>10} | {'V1/CNN':>7} | "
         f"{'V2/CNN':>7} | {'V3/CNN':>7} | {'V4/CNN':>7}"
     )
     print("-" * 126)
