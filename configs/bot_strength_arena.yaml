@@ -1,8 +1,10 @@
 bot_strength_arena:
   checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
-  output_dir: "runs/connect6_cnn_05/bot_strength_arena_pairfirst_liveroad"
+  output_dir: "runs/connect6_cnn_05/bot_strength_arena_pairfirst_liveroad_even"
   device: "cuda"
 
+  # CNN gauntlet is filtered by tools/run_bot_strength_arena.py to even updates
+  # only: model_update_2, 4, 6, ... . Bot-vs-bot and Cloudict are unchanged.
   # V3 = TOP16 -> C(16,2)=120 exact own pairs, no reply search.
   # V4 = TOP12 -> 66 exact own pairs -> TOP4 -> opponent V2 TOP6
   #      -> all C(6,2)=15 full two-stone reply pairs per finalist.
