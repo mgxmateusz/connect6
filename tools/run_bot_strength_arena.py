@@ -19,6 +19,9 @@ from connect6.evaluation import bot_strength_arena as _base
 from connect6.evaluation import cloudict_arena as _cloudict
 
 
+# Full Pair is a normal arena participant here, exactly like every other bot.
+# The config decides which registered bots run through all three standard stages:
+# CNN gauntlet, full bot-vs-bot round robin, then Cloudict.
 _base.BOT_SPECS = (
     _model_arena.BotSpec(
         "v1",
@@ -50,9 +53,6 @@ _base.BOT_SPECS = (
         "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1",
         GPUTacticalBotV4,
     ),
-    # Benchmark/reference only. It is deliberately NOT part of config `bots`,
-    # so it never enters model gauntlet, Cloudict or normal gameplay. The
-    # wrapper below runs only the diagnostic V3 TOP16 vs exhaustive pair match.
     _model_arena.BotSpec(
         "full",
         "GPU Tactical Bot Full Pair Brute Force",
@@ -63,50 +63,9 @@ _base.BOT_SPECS = (
 _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
 
 
-_OriginalRunBotRoundRobin = _base._run_bot_round_robin
-
-
-def _run_bot_round_robin_with_full_pair_reference(
-    specs,
-    *,
-    output_dir,
-    device,
-    opening_size,
-    sync_interval,
-):
-    """Run the normal league, then one benchmark-only V3 TOP16 vs FULL pair."""
-    rows = _OriginalRunBotRoundRobin(
-        specs,
-        output_dir=output_dir,
-        device=device,
-        opening_size=opening_size,
-        sync_interval=sync_interval,
-    )
-
-    by_key = {spec.key: spec for spec in specs}
-    v3 = by_key.get("v3")
-    full = _base.BOT_BY_KEY.get("full")
-    if v3 is None or full is None:
-        return rows
-
-    print("\n# REFERENCJA: V3 TOP16 vs FULL PAIR BRUTE FORCE")
-    print(
-        "FULL sprawdza wszystkie legalne nieuporzadkowane pary C(E,2); "
-        "nie bierze udzialu w model gauntlet ani Cloudict."
-    )
-    _OriginalRunBotRoundRobin(
-        (v3, full),
-        output_dir=output_dir,
-        device=device,
-        opening_size=opening_size,
-        sync_interval=sync_interval,
-    )
-    return _base._rows(Path(output_dir) / "bot_vs_bot.csv")
-
-
-_base._run_bot_round_robin = _run_bot_round_robin_with_full_pair_reference
-
-
+# In bot-vs-bot, draws are diagnostic but should not pull every comparison
+# toward 50%. The reported score is therefore the win share among DECISIVE
+# games only: wins / (wins + losses). W/D/L and total games remain unchanged.
 def _decisive_pair_rows(pair_rows):
     converted = []
     for raw in pair_rows:
