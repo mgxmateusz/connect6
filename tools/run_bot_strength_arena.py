@@ -1,4 +1,5 @@
 from pathlib import Path
+import csv
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,97 @@ _base.BOT_SPECS = (
     ),
 )
 _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
+
+
+# In bot-vs-bot, draws are diagnostic but should not pull every comparison
+# toward 50%. The reported score is therefore the win share among DECISIVE
+# games only: wins / (wins + losses). W/D/L and total games remain unchanged.
+def _decisive_pair_rows(pair_rows):
+    converted = []
+    for raw in pair_rows:
+        row = dict(raw)
+        try:
+            a_wins = int(row.get("a_wins", 0))
+            b_wins = int(row.get("b_wins", 0))
+        except (TypeError, ValueError):
+            converted.append(row)
+            continue
+
+        decisive = a_wins + b_wins
+        if decisive > 0:
+            a_pct = 100.0 * a_wins / decisive
+            b_pct = 100.0 * b_wins / decisive
+        else:
+            # No decisive game means there is no evidence either way. Keep a
+            # neutral numeric value for downstream CSV/summary compatibility.
+            a_pct = b_pct = 50.0
+
+        row["a_score_pct"] = f"{a_pct:.3f}"
+        row["b_score_pct"] = f"{b_pct:.3f}"
+        converted.append(row)
+    return converted
+
+
+def _rewrite_pair_csv(path: Path, rows) -> None:
+    if not rows:
+        return
+    fields = list(_base.PAIR_FIELDS)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def _print_decisive_pair_summary(rows) -> None:
+    if not rows:
+        return
+    print("\n# BOT-VS-BOT — % WYGRANYCH TYLKO W ROZSTRZYGNIETYCH GRACH")
+    for row in rows:
+        try:
+            aw = int(row.get("a_wins", 0))
+            dr = int(row.get("draws", 0))
+            bw = int(row.get("b_wins", 0))
+        except (TypeError, ValueError):
+            continue
+        decisive = aw + bw
+        if decisive:
+            a_pct = float(row["a_score_pct"])
+            b_pct = float(row["b_score_pct"])
+            pct_text = f"{a_pct:.2f}% / {b_pct:.2f}%"
+        else:
+            pct_text = "N/A (0 rozstrzygnietych)"
+        print(
+            f"{row.get('bot_a', '?').upper()} vs {row.get('bot_b', '?').upper()}: "
+            f"{aw} W / {dr} D / {bw} L | decisive={decisive} | {pct_text}"
+        )
+
+
+_OriginalWriteSummary = _base._write_summary
+
+
+def _write_summary_with_decisive_pairs(
+    output_dir,
+    specs,
+    model_summaries,
+    pair_rows,
+    cloud_rows,
+    depths,
+):
+    converted = _decisive_pair_rows(pair_rows)
+    _rewrite_pair_csv(Path(output_dir) / "bot_vs_bot.csv", converted)
+    _print_decisive_pair_summary(converted)
+    return _OriginalWriteSummary(
+        output_dir,
+        specs,
+        model_summaries,
+        converted,
+        cloud_rows,
+        depths,
+    )
+
+
+_base._write_summary = _write_summary_with_decisive_pairs
 
 
 def _transform_action(action: int, symmetry: int) -> int:
