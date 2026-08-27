@@ -19,8 +19,8 @@ from connect6.evaluation import cloudict_arena as _cloudict
 
 # Register the current experimental ladder explicitly. V3 is the former V4
 # TOP16/120-pair no-reply algorithm. V4 widens its own search to TOP12/66 pairs,
-# keeps TOP4 own pairs, then uses V2 from the opponent perspective to keep only
-# the opponent's TOP4 single-stone replies for exact state evaluation.
+# keeps TOP4 own pairs, then uses V2 from the opponent perspective to keep its
+# TOP4 cells and evaluates all C(4,2)=6 full two-stone reply pairs.
 # New signatures prevent historical V3/V4 CSV/state from being reused.
 _base.BOT_SPECS = (
     _model_arena.BotSpec(
@@ -43,8 +43,8 @@ _base.BOT_SPECS = (
     ),
     _model_arena.BotSpec(
         "v4",
-        "GPU Tactical Bot V4 Top12 Reply4",
-        "gpu_tactical_bot_v4_top12_pair_top4_v2reply4_v1",
+        "GPU Tactical Bot V4 Top12 ReplyPair4",
+        "gpu_tactical_bot_v4_top12_pair_top4_v2reply4_pairs_v1",
         GPUTacticalBotV4,
     ),
 )
