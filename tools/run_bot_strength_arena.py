@@ -18,8 +18,8 @@ from connect6.evaluation import cloudict_arena as _cloudict
 
 
 # Register the current experimental ladder explicitly. V3 is the former V4
-# TOP16/120-pair no-reply algorithm. V4 is the new TOP8/28-pair search whose
-# best four own pairs are checked against every legal one-stone opponent reply.
+# TOP16/120-pair no-reply algorithm. V4 is the TOP8/28-pair search whose
+# best three own pairs are checked against every legal one-stone opponent reply.
 # New signatures prevent historical V3/V4 CSV/state from being reused.
 _base.BOT_SPECS = (
     _model_arena.BotSpec(
@@ -42,8 +42,8 @@ _base.BOT_SPECS = (
     ),
     _model_arena.BotSpec(
         "v4",
-        "GPU Tactical Bot V4 Top8 Reply1",
-        "gpu_tactical_bot_v4_top8_pair_top4_all_reply1_v1",
+        "GPU Tactical Bot V4 Top8 Reply1 Top3",
+        "gpu_tactical_bot_v4_top8_pair_top3_all_reply1_v1",
         GPUTacticalBotV4,
     ),
 )
@@ -69,8 +69,6 @@ def _decisive_pair_rows(pair_rows):
             a_pct = 100.0 * a_wins / decisive
             b_pct = 100.0 * b_wins / decisive
         else:
-            # No decisive game means there is no evidence either way. Keep a
-            # neutral numeric value for downstream CSV/summary compatibility.
             a_pct = b_pct = 50.0
 
         row["a_score_pct"] = f"{a_pct:.3f}"
