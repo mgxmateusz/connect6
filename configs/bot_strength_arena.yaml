@@ -6,10 +6,10 @@ bot_strength_arena:
   # Pełna drabinka aktualnych botów.
   bots: ["v1", "v2", "v3", "v4", "v5"]
 
-  # Etap 1: każdy autosave CNN gra z każdym botem dwa razy
-  # (model raz czarny, raz biały), dokładnie jak w bot arena/championship.
-  models_per_batch: 256
-  inference_dtype: "bfloat16"
+  # Etap 1 FAST: wszystkie checkpointy są pakowane raz do natywnego layoutu
+  # FP16/WMMA, a potem grają z botami bez HistoricalPolicyEnsemble/PyTorch forward.
+  models_per_batch: 512
+  native_load_chunk_models: 32
   sync_interval_moves: 16
 
   # Etap 2: każdy bot z każdym. Wszystkie 361 możliwych pierwszych pól,
