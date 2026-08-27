@@ -44,9 +44,9 @@ def load_native_bot_extension(*, verbose: bool = False):
         str(root / "native_bot_v4_kernel.cu"),
     ]
 
-    # v8 keeps pair-state/full-turn V3 and adds the independent V4 experiment:
-    # one TOP32 V2 candidate pass, all 496 unordered own pairs, no opponent tree.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v8"
+    # v9 keeps pair-state/full-turn V3 and changes V4 to the cheaper experiment:
+    # one TOP16 V2 candidate pass, all 120 unordered own pairs, no opponent tree.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v9"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,7 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use compiles V1/V2 + V3 full-turn + V4 TOP32 pair CUDA kernels; "
+        "[BOT BUILD] First use compiles V1/V2 + V3 full-turn + V4 TOP16 pair CUDA kernels; "
         "later runs use the cache.",
         flush=True,
     )
