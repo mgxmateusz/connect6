@@ -13,6 +13,7 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBotFullPair,
     GPUTacticalBotPairFirst,
     GPUTacticalBotLiveRoad,
+    GPUTacticalBotHybrid,
 )
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
@@ -160,6 +161,7 @@ def main() -> None:
     bot_v3 = GPUTacticalBotV3(device)
     bot_v4 = GPUTacticalBotV4(device)
     bot_pair = GPUTacticalBotPairFirst(device)
+    bot_hybrid = GPUTacticalBotHybrid(device)
     bot_live = GPUTacticalBotLiveRoad(device)
     bot_full = GPUTacticalBotFullPair(device)
 
@@ -174,7 +176,7 @@ def main() -> None:
     seed_left_two = torch.full((1,), 2, dtype=torch.int8, device=device)
     bot_v1.actions(seed_board, seed_player, seed_left_one)
     bot_v2.actions(seed_board, seed_player, seed_left_one)
-    for bot in (bot_v3, bot_v4, bot_pair, bot_live, bot_full):
+    for bot in (bot_v3, bot_v4, bot_pair, bot_hybrid, bot_live, bot_full):
         bot.reset()
         bot.actions(seed_board, seed_player, seed_left_two)
         bot.actions(seed_board, seed_player, seed_left_one)
@@ -185,6 +187,7 @@ def main() -> None:
     print("V3: TOP16 cells -> C(16,2)=120 exact states, no reply.")
     print("V4: TOP12 -> 66 own exact -> TOP4 -> opponent TOP6 -> 4*C(6,2)=60 exact replies; total=126.")
     print("Pair: every legal pair cheap pair-aware score -> TOP128 -> 128 exact states.")
+    print("Hybrid: pure LiveRoad cells -> all retained pairs cheap-scored -> TOP128 -> exact states; no V2 floor.")
     print("Live: all pairs from live-road cell pool -> exact state for every retained pair; pool is at least 16 cells.")
     print("Full: every legal C(E,2) pair -> exact state for every pair.")
     print(
@@ -194,10 +197,10 @@ def main() -> None:
     print()
     print(
         f"{'batch':>6} | {'stones':>11} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
-        f"{'V3 ms':>9} | {'V4 ms':>9} | {'Pair P128':>10} | {'LiveRoad':>10} | {'Full':>10} | "
-        f"{'Pair/CNN':>8} | {'Live/CNN':>8} | {'Full/CNN':>8}"
+        f"{'V3 ms':>9} | {'V4 ms':>9} | {'Pair P128':>10} | {'Hybrid':>10} | {'LiveRoad':>10} | {'Full':>10} | "
+        f"{'Pair/CNN':>8} | {'Hyb/CNN':>8} | {'Live/CNN':>8} | {'Full/CNN':>8}"
     )
-    print("-" * 156)
+    print("-" * 179)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left, stone_counts = _make_legal_positions(
@@ -218,6 +221,7 @@ def main() -> None:
         v3_ms = _elapsed_search_avg_decision_ms(bot_v3, boards, players, warmup=args.warmup, iterations=args.iters)
         v4_ms = _elapsed_search_avg_decision_ms(bot_v4, boards, players, warmup=args.warmup, iterations=args.iters)
         pair_ms = _elapsed_search_avg_decision_ms(bot_pair, boards, players, warmup=args.warmup, iterations=args.iters)
+        hybrid_ms = _elapsed_search_avg_decision_ms(bot_hybrid, boards, players, warmup=args.warmup, iterations=args.iters)
         live_ms = _elapsed_search_avg_decision_ms(
             bot_live,
             boards,
@@ -235,8 +239,8 @@ def main() -> None:
 
         print(
             f"{batch:6d} | {stone_label:>11} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
-            f"{v3_ms:9.4f} | {v4_ms:9.4f} | {pair_ms:10.4f} | {live_ms:10.4f} | {full_ms:10.4f} | "
-            f"{pair_ms/model_ms:8.3f} | {live_ms/model_ms:8.3f} | {full_ms/model_ms:8.3f}"
+            f"{v3_ms:9.4f} | {v4_ms:9.4f} | {pair_ms:10.4f} | {hybrid_ms:10.4f} | {live_ms:10.4f} | {full_ms:10.4f} | "
+            f"{pair_ms/model_ms:8.3f} | {hybrid_ms/model_ms:8.3f} | {live_ms/model_ms:8.3f} | {full_ms/model_ms:8.3f}"
         )
 
 
