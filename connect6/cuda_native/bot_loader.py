@@ -40,13 +40,14 @@ def load_native_bot_extension(*, verbose: bool = False):
     sources = [
         str(root / "native_bot.cpp"),
         str(root / "native_bot_kernel.cu"),
-        str(root / "native_bot_search_kernel.cu"),
+        str(root / "native_bot_v3_kernel.cu"),
         str(root / "native_bot_v4_kernel.cu"),
     ]
 
-    # v9 keeps pair-state/full-turn V3 and changes V4 to the cheaper experiment:
-    # one TOP16 V2 candidate pass, all 120 unordered own pairs, no opponent tree.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v9"
+    # v10 removes the old full-turn V3. New V3 is the proven TOP16/120-pair
+    # no-reply search. New V4 starts from TOP8/28 pairs, keeps TOP4 own pairs,
+    # then minimizes over every legal single-stone opponent reply.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v10"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -64,7 +65,7 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use compiles V1/V2 + V3 full-turn + V4 TOP16 pair CUDA kernels; "
+        "[BOT BUILD] First use compiles V1/V2 + V3 TOP16 + V4 TOP8/Reply1 CUDA kernels; "
         "later runs use the cache.",
         flush=True,
     )
