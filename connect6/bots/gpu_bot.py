@@ -10,6 +10,7 @@ GPU_TACTICAL_BOT_V2 = "GPU Tactical Bot V2"
 GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Top16 Pair-State"
 GPU_TACTICAL_BOT_SMALL = "GPU Tactical Bot Small Top12 Pair-State"
 GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top12 ReplyPair6"
+GPU_TACTICAL_BOT_FULL_PAIR = "GPU Tactical Bot Full Pair Brute Force"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -135,6 +136,18 @@ class GPUTacticalBotV4(_SearchGPUTacticalBot):
     label = GPU_TACTICAL_BOT_V4
 
 
+class GPUTacticalBotFullPair(_SearchGPUTacticalBot):
+    """Benchmark-only exhaustive reference: every legal two-stone pair.
+
+    It intentionally uses the same pair-state evaluator as V3 and differs only
+    in candidate width: V3 evaluates TOP16/C(16,2), this bot evaluates C(E,2)
+    over all empty cells. It is far too expensive for normal play/training.
+    """
+
+    entrypoint = "tactical_bot_full_pair_actions"
+    label = GPU_TACTICAL_BOT_FULL_PAIR
+
+
 # Compatibility name used by older arena modules.
 GPUTacticalBotV4B8x2 = GPUTacticalBotV4
 
@@ -163,4 +176,6 @@ def create_gpu_tactical_bot(
         return GPUTacticalBotSmall(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_V4:
         return GPUTacticalBotV4(device, verbose_build=verbose_build)
+    if label == GPU_TACTICAL_BOT_FULL_PAIR:
+        return GPUTacticalBotFullPair(device, verbose_build=verbose_build)
     raise ValueError(f"Unknown GPU tactical bot: {label}")
