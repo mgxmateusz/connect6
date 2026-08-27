@@ -16,9 +16,10 @@ from connect6.evaluation import bot_strength_arena as _base
 from connect6.evaluation import cloudict_arena as _cloudict
 
 
-# Register the current experimental ladder explicitly. Signatures differ from
-# the deleted historical V3/V4/V5 implementations, so stale state can never be
-# resumed as if it belonged to the new algorithms.
+# Register the current experimental ladder explicitly. V3 is the former V4
+# TOP16/120-pair no-reply algorithm. V4 is the new TOP8/28-pair search whose
+# best four own pairs are checked against every legal one-stone opponent reply.
+# New signatures prevent historical V3/V4 CSV/state from being reused.
 _base.BOT_SPECS = (
     _model_arena.BotSpec(
         "v1",
@@ -34,25 +35,20 @@ _base.BOT_SPECS = (
     ),
     _model_arena.BotSpec(
         "v3",
-        "GPU Tactical Bot V3 Pair-State Full-Turn",
-        "gpu_tactical_bot_v3_pair_state_full_turn_v1",
+        "GPU Tactical Bot V3 Top16 Pair-State",
+        "gpu_tactical_bot_v3_top16_pair_state_v1",
         GPUTacticalBotV3,
     ),
     _model_arena.BotSpec(
         "v4",
-        "GPU Tactical Bot V4 Top16 Pair-State",
-        "gpu_tactical_bot_v4_top16_pair_state_v1",
+        "GPU Tactical Bot V4 Top8 Reply1",
+        "gpu_tactical_bot_v4_top8_pair_top4_all_reply1_v1",
         GPUTacticalBotV4,
     ),
 )
 _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
 
 
-# Cloudict has a known failure mode on some board orientations/openings: its
-# stdout closes and the process dies before returning a move. The standalone
-# Cloudict ladder already works around this by retrying the same logical game in
-# another symmetry. Do the same for the strength arena without changing the
-# locally observed board or the recorded opening.
 def _transform_action(action: int, symmetry: int) -> int:
     r, c = divmod(int(action), 19)
     n = 18
@@ -126,9 +122,6 @@ class _SymmetricRetryCloudictEngine(_OriginalCloudictEngine):
         return self._reply_to_local(reply)
 
 
-# _run_cloudict instantiates base.cloudict.CloudictEngine on every restart.
-# Replacing it here means retry #1/#2/... automatically rotates the protocol
-# while all game bookkeeping remains in the original local orientation.
 _base.cloudict.CloudictEngine = _SymmetricRetryCloudictEngine
 
 from connect6.evaluation.bot_strength_arena_fast import main
