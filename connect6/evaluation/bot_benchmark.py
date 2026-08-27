@@ -129,11 +129,11 @@ def main() -> None:
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     parser.add_argument("--batch-sizes", default="1,32,128,256,512,1024")
     parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--iters", type=int, default=2000)
+    parser.add_argument("--iters", type=int, default=500)
     parser.add_argument(
         "--heavy-iters",
         type=int,
-        default=10,
+        default=50,
         help="Iterations for very expensive LiveRoad/Full timings (mean ms is still comparable).",
     )
     parser.add_argument(
