@@ -5,7 +5,12 @@ from pathlib import Path
 
 import torch
 
-from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2, GPUTacticalBotV3
+from connect6.bots.gpu_bot import (
+    GPUTacticalBot,
+    GPUTacticalBotV2,
+    GPUTacticalBotV3,
+    GPUTacticalBotV4,
+)
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
 from connect6.engine.vector_env import canonical_network_input
@@ -108,7 +113,7 @@ def _elapsed_search_avg_decision_ms(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="GPU decision benchmark: CNN vs Tactical Bot V1/V2/V3 Pair-State"
+        description="GPU decision benchmark: CNN vs Tactical Bot V1/V2/V3/V4"
     )
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
@@ -130,6 +135,7 @@ def main() -> None:
     bot_v1 = GPUTacticalBot(device)
     bot_v2 = GPUTacticalBotV2(device)
     bot_v3 = GPUTacticalBotV3(device)
+    bot_v4 = GPUTacticalBotV4(device)
 
     tr_cfg = payload.get("config", {}).get("training", {})
     amp_enabled = bool(tr_cfg.get("amp", True))
@@ -146,9 +152,10 @@ def main() -> None:
     seed_left_two = torch.full((1,), 2, dtype=torch.int8, device=device)
     bot_v1.actions(seed_board, seed_player, seed_left_one)
     bot_v2.actions(seed_board, seed_player, seed_left_one)
-    bot_v3.reset()
-    bot_v3.actions(seed_board, seed_player, seed_left_two)
-    bot_v3.actions(seed_board, seed_player, seed_left_one)
+    for bot in (bot_v3, bot_v4):
+        bot.reset()
+        bot.actions(seed_board, seed_player, seed_left_two)
+        bot.actions(seed_board, seed_player, seed_left_one)
     torch.cuda.synchronize()
 
     print(f"GPU: {torch.cuda.get_device_name(device)}")
@@ -158,23 +165,19 @@ def main() -> None:
         f"(autocast={'on' if amp_enabled else 'off'}, dtype={amp_name})"
     )
     print("V1/V2 timing: one native CUDA scoring decision.")
+    print("V3: TOP8xTOP4 own pairs -> state TOP4 -> full opponent 4x2 replies.")
+    print("V4: one TOP32 candidate pass -> all C(32,2)=496 pair states; no opponent reply.")
     print(
-        "V3 timing: full pair-state search + cached second decision, then /2 "
-        "(fair ms per played stone)."
-    )
-    print(
-        "V3 worst-case heavy V2-score work per planned turn: "
-        "1 root + 8 own-second + 4 kept pairs*(1 opponent-root + 4 opponent-second) "
-        "= 29 score_all passes, plus cheap 924-road state evaluations. "
-        "Old V5 used 41 score_all passes."
+        "V3 worst-case heavy V2 work: 29 score_all passes + state evals. "
+        "V4 heavy V2 work: only 1 score_all pass + 496 state evals."
     )
     print()
 
     print(
         f"{'batch':>6} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
-        f"{'V3 PairState':>12} | {'V3/CNN':>7} | {'V3/V2':>7}"
+        f"{'V3 FullTurn':>11} | {'V4 Top32':>10} | {'V3/V2':>7} | {'V4/V2':>7}"
     )
-    print("-" * 75)
+    print("-" * 91)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left = _make_positions(batch, device, args.occupied)
@@ -207,10 +210,18 @@ def main() -> None:
             warmup=args.warmup,
             iterations=args.iters,
         )
+        v4_ms = _elapsed_search_avg_decision_ms(
+            bot_v4,
+            boards,
+            players,
+            warmup=args.warmup,
+            iterations=args.iters,
+        )
 
         print(
             f"{batch:6d} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
-            f"{v3_ms:12.4f} | {v3_ms / model_ms:7.3f} | {v3_ms / v2_ms:7.2f}"
+            f"{v3_ms:11.4f} | {v4_ms:10.4f} | {v3_ms / v2_ms:7.2f} | "
+            f"{v4_ms / v2_ms:7.2f}"
         )
 
 
