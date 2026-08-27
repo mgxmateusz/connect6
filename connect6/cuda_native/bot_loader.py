@@ -38,7 +38,7 @@ def load_native_bot_extension(*, verbose: bool = False):
 
     root = Path(__file__).resolve().parent
     sources = [
-        str(root / "native_bot_v16.cpp"),
+        str(root / "native_bot_v17.cpp"),
         str(root / "native_bot_kernel.cu"),
         str(root / "native_bot_v3_kernel.cu"),
         str(root / "native_bot_small_kernel.cu"),
@@ -46,12 +46,12 @@ def load_native_bot_extension(*, verbose: bool = False):
         str(root / "native_bot_full_pair_kernel.cu"),
         str(root / "native_bot_pairfirst_kernel.cu"),
         str(root / "native_bot_liveroad_kernel.cu"),
+        str(root / "native_bot_hybrid_liveroad_pair128_kernel.cu"),
     ]
 
-    # v16 adds two pair-native experiments:
-    # - PairFirst: score every legal C(E,2) pair cheaply, then exact TOP128.
-    # - LiveRoad: exact brute force over an adaptive structural cell pool.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v16"
+    # v17 adds a pure hybrid benchmark candidate:
+    # LiveRoad structural pool -> cheap pair-aware scoring -> global TOP128 exact.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v17"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -70,8 +70,8 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
         "[BOT BUILD] First use compiles V1/V2 + V3 TOP16 + Small TOP12 + "
-        "V4 ReplyPair6 + Full Pair + PairFirst P128 + LiveRoad CUDA kernels; "
-        "later runs use the cache.",
+        "V4 ReplyPair6 + Full Pair + PairFirst P128 + LiveRoad + "
+        "Hybrid LiveRoad->Pair128 CUDA kernels; later runs use the cache.",
         flush=True,
     )
 
