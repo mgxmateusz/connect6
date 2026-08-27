@@ -5,8 +5,6 @@ namespace {
 using namespace v4_detail;
 
 constexpr int TOP_PAIR_K = 128;
-constexpr int LOCAL_KEEP = 4;
-constexpr int LOCAL_SLOTS = THREADS * LOCAL_KEEP;
 
 struct PairFeatures {
     int64_t soft_delta;
@@ -62,6 +60,8 @@ __device__ __forceinline__ bool window_contains_cell(
 }
 
 __device__ __forceinline__ void mark_finish(PairFeatures& f, int cell) {
+    // Cheap approximate diversity signal. Collisions are acceptable here: this
+    // is only a prefilter and the retained pairs are scored exactly afterwards.
     const int bit = cell & 127;
     if (bit < 64) f.finish_lo |= uint64_t{1} << bit;
     else f.finish_hi |= uint64_t{1} << (bit - 64);
@@ -109,6 +109,9 @@ __device__ __forceinline__ void accumulate_pair_window(
         }
     }
 
+    // This is the exact delta of the final evaluator's additive soft road term
+    // for this changed road. Unchanged roads are a board-wide constant and do
+    // not need to be rescanned for candidate ordering.
     f.soft_delta += static_cast<int64_t>(signed_road_soft(
         after_mine, after_opp, after_mine_mask, after_opp_mask));
     f.soft_delta -= static_cast<int64_t>(signed_road_soft(
@@ -170,9 +173,8 @@ __device__ __forceinline__ int64_t cheap_pair_score(
         }
     }
 
-    // Scan roads touched only by the second stone. Any road containing both
-    // stones was already processed above, so every changed six-cell road is
-    // evaluated exactly once.
+    // Scan roads touched only by the second stone. Roads containing A and B
+    // were already processed from A, so each changed six-cell road appears once.
     #pragma unroll
     for (int d = 0; d < 4; ++d) {
         const int dr = DR[d];
@@ -190,8 +192,8 @@ __device__ __forceinline__ int64_t cheap_pair_score(
         }
     }
 
-    // Existing clean opponent 4/5 roads are immediate threats on its next
-    // two-stone turn. A non-winning pair must hit every such road with A or B.
+    // Existing opponent clean 4/5 roads are immediate threats on its next
+    // two-stone turn. Unless A+B wins now, it must cover every such road.
     bool blocks_all_immediate = base_opp_overflow == 0;
     int covered = 0;
     int capped = base_opp_threat_count;
@@ -210,32 +212,30 @@ __device__ __forceinline__ int64_t cheap_pair_score(
     const int centre_first = 18 - (iabs(ar - 9) + iabs(ac - 9));
     const int centre_second = 18 - (iabs(br - 9) + iabs(bc - 9));
 
-    // Lexicographic-style scale: terminal win first; if the opponent already
-    // has an immediate clean 4/5, covering all of it is mandatory; afterwards
-    // prefer pairs that create several diverse 4/5 threats. Soft road delta is
-    // deliberately lower-order and mirrors the exact evaluator's road value.
+    // Large gaps make tactical classes dominate; soft delta only orders pairs
+    // inside those classes. Exact evaluate_state_parallel remains authoritative.
     int64_t score = 0;
     if (f.own_win > 0) {
-        score += INT64_C(8000000000000000);
-        score += static_cast<int64_t>(f.own_win) * INT64_C(10000000000000);
+        score += 8000000000000000LL;
+        score += static_cast<int64_t>(f.own_win) * 10000000000000LL;
     } else if (base_opp_threat_count > 0) {
         if (blocks_all_immediate) {
-            score += INT64_C(3000000000000000);
-            score += static_cast<int64_t>(covered) * INT64_C(1000000000000);
+            score += 3000000000000000LL;
+            score += static_cast<int64_t>(covered) * 1000000000000LL;
         } else {
-            score -= INT64_C(4000000000000000);
-            score += static_cast<int64_t>(covered) * INT64_C(1000000000000);
+            score -= 4000000000000000LL;
+            score += static_cast<int64_t>(covered) * 1000000000000LL;
         }
     }
 
-    score += static_cast<int64_t>(f.own_fives) * INT64_C(220000000000);
-    score += static_cast<int64_t>(f.own_fours) * INT64_C(30000000000);
-    score += static_cast<int64_t>(f.own_threats) * INT64_C(10000000000);
-    score += static_cast<int64_t>(direction_count) * INT64_C(6000000000);
-    score += static_cast<int64_t>(finish_diversity) * INT64_C(2500000000);
-    score += static_cast<int64_t>(f.own_threes) * INT64_C(120000000);
-    score += f.soft_delta * INT64_C(1000);
-    score += static_cast<int64_t>(centre_first + centre_second) * INT64_C(1000);
+    score += static_cast<int64_t>(f.own_fives) * 220000000000LL;
+    score += static_cast<int64_t>(f.own_fours) * 30000000000LL;
+    score += static_cast<int64_t>(f.own_threats) * 10000000000LL;
+    score += static_cast<int64_t>(direction_count) * 6000000000LL;
+    score += static_cast<int64_t>(finish_diversity) * 2500000000LL;
+    score += static_cast<int64_t>(f.own_threes) * 120000000LL;
+    score += f.soft_delta * 1000LL;
+    score += static_cast<int64_t>(centre_first + centre_second) * 1000LL;
     return score;
 }
 
@@ -259,9 +259,10 @@ __global__ void tactical_search_pairfirst_p128_kernel(
     __shared__ int empty_actions[CELLS];
     __shared__ int empty_count;
 
-    __shared__ int local_first[LOCAL_SLOTS];
-    __shared__ int local_second[LOCAL_SLOTS];
-    __shared__ int64_t local_scores[LOCAL_SLOTS];
+    // One row of pair scores is enough: threads score all B for a fixed A in
+    // parallel, then thread 0 merges that complete row into the exact global
+    // TOP128. No per-thread shortlist can silently discard a globally top pair.
+    __shared__ int64_t row_scores[CELLS];
     __shared__ int selected_first[TOP_PAIR_K];
     __shared__ int selected_second[TOP_PAIR_K];
     __shared__ int64_t selected_scores[TOP_PAIR_K];
@@ -298,7 +299,6 @@ __global__ void tactical_search_pairfirst_p128_kernel(
     for (int i = tid; i < CELLS; i += blockDim.x) board[i] = src[i];
     __syncthreads();
 
-    // One-stone turns keep the proven V2 greedy behaviour used by V3/V4/Full.
     if (left <= 1) {
         score_all(board, player, left, scores);
         __syncthreads();
@@ -311,7 +311,8 @@ __global__ void tactical_search_pairfirst_p128_kernel(
         return;
     }
 
-    // Keep the same immediate single-stone win shortcut as the existing bots.
+    // Same immediate single-stone win shortcut as V3/V4/Full. V2 does not
+    // prune any two-stone candidate in this bot.
     score_all(board, player, 2, scores);
     __syncthreads();
     if (tid == 0) {
@@ -332,9 +333,8 @@ __global__ void tactical_search_pairfirst_p128_kernel(
     __syncthreads();
     if (empty_count < 0) return;
 
-    // Collect the current opponent immediate 4/5 roads once. The cheap pair
-    // scorer can then reject pairs that fail to cover them without rescanning
-    // all 924 roads per pair.
+    // Collect current opponent immediate 4/5 roads once for exact defensive
+    // coverage in the cheap stage.
     if (tid == 0) {
         base_opp_threat_count = 0;
         base_opp_overflow = 0;
@@ -374,24 +374,22 @@ __global__ void tactical_search_pairfirst_p128_kernel(
     }
     __syncthreads();
 
-    int64_t best_local_score[LOCAL_KEEP];
-    int best_local_first[LOCAL_KEEP];
-    int best_local_second[LOCAL_KEEP];
-    #pragma unroll
-    for (int k = 0; k < LOCAL_KEEP; ++k) {
-        best_local_score[k] = INT64_MIN;
-        best_local_first[k] = -1;
-        best_local_second[k] = -1;
+    if (tid == 0) {
+        for (int q = 0; q < TOP_PAIR_K; ++q) {
+            selected_scores[q] = static_cast<int64_t>(LLONG_MIN);
+            selected_first[q] = -1;
+            selected_second[q] = -1;
+        }
     }
+    __syncthreads();
 
-    // Every legal unordered pair is scored directly as a two-stone action.
-    // For each first index, threads stride the second index, which distributes
-    // C(E,2) work evenly without triangular-index decoding.
+    // Exact global TOP128 over the cheap score. Every legal unordered pair is
+    // scored exactly once; the only pruning happens after pair-aware scoring.
     for (int i = 0; i + 1 < empty_count; ++i) {
         const int first = empty_actions[i];
         for (int j = i + 1 + tid; j < empty_count; j += blockDim.x) {
             const int second = empty_actions[j];
-            const int64_t pair_score = cheap_pair_score(
+            row_scores[j] = cheap_pair_score(
                 board,
                 first,
                 second,
@@ -400,81 +398,57 @@ __global__ void tactical_search_pairfirst_p128_kernel(
                 opp_tb,
                 base_opp_threat_count,
                 base_opp_overflow);
+        }
+        __syncthreads();
 
-            #pragma unroll
-            for (int pos = 0; pos < LOCAL_KEEP; ++pos) {
-                if (cheap_pair_better(
+        if (tid == 0) {
+            for (int j = i + 1; j < empty_count; ++j) {
+                const int second = empty_actions[j];
+                const int64_t pair_score = row_scores[j];
+
+                // Once TOP128 is full, almost every pair exits on this single
+                // threshold comparison; insertion/shifting is only for a real
+                // global-top candidate.
+                if (selected_first[TOP_PAIR_K - 1] >= 0 &&
+                    !cheap_pair_better(
                         pair_score,
                         first,
                         second,
-                        best_local_score[pos],
-                        best_local_first[pos],
-                        best_local_second[pos])) {
-                    #pragma unroll
-                    for (int s = LOCAL_KEEP - 1; s > pos; --s) {
-                        best_local_score[s] = best_local_score[s - 1];
-                        best_local_first[s] = best_local_first[s - 1];
-                        best_local_second[s] = best_local_second[s - 1];
+                        selected_scores[TOP_PAIR_K - 1],
+                        selected_first[TOP_PAIR_K - 1],
+                        selected_second[TOP_PAIR_K - 1])) {
+                    continue;
+                }
+
+                for (int pos = 0; pos < TOP_PAIR_K; ++pos) {
+                    if (cheap_pair_better(
+                            pair_score,
+                            first,
+                            second,
+                            selected_scores[pos],
+                            selected_first[pos],
+                            selected_second[pos])) {
+                        for (int s = TOP_PAIR_K - 1; s > pos; --s) {
+                            selected_scores[s] = selected_scores[s - 1];
+                            selected_first[s] = selected_first[s - 1];
+                            selected_second[s] = selected_second[s - 1];
+                        }
+                        selected_scores[pos] = pair_score;
+                        selected_first[pos] = first;
+                        selected_second[pos] = second;
+                        break;
                     }
-                    best_local_score[pos] = pair_score;
-                    best_local_first[pos] = first;
-                    best_local_second[pos] = second;
-                    break;
                 }
             }
         }
+        __syncthreads();
     }
-
-    #pragma unroll
-    for (int k = 0; k < LOCAL_KEEP; ++k) {
-        const int slot = tid * LOCAL_KEEP + k;
-        local_scores[slot] = best_local_score[k];
-        local_first[slot] = best_local_first[k];
-        local_second[slot] = best_local_second[k];
-    }
-    __syncthreads();
-
-    // Merge the per-thread shortlists to global TOP128 pair candidates.
-    if (tid == 0) {
-        for (int q = 0; q < TOP_PAIR_K; ++q) {
-            selected_scores[q] = INT64_MIN;
-            selected_first[q] = -1;
-            selected_second[q] = -1;
-        }
-        for (int slot = 0; slot < LOCAL_SLOTS; ++slot) {
-            const int first = local_first[slot];
-            const int second = local_second[slot];
-            if (first < 0 || second < 0) continue;
-            const int64_t pair_score = local_scores[slot];
-            for (int pos = 0; pos < TOP_PAIR_K; ++pos) {
-                if (cheap_pair_better(
-                        pair_score,
-                        first,
-                        second,
-                        selected_scores[pos],
-                        selected_first[pos],
-                        selected_second[pos])) {
-                    for (int s = TOP_PAIR_K - 1; s > pos; --s) {
-                        selected_scores[s] = selected_scores[s - 1];
-                        selected_first[s] = selected_first[s - 1];
-                        selected_second[s] = selected_second[s - 1];
-                    }
-                    selected_scores[pos] = pair_score;
-                    selected_first[pos] = first;
-                    selected_second[pos] = second;
-                    break;
-                }
-            }
-        }
-    }
-    __syncthreads();
 
     int best_value = INVALID_SCORE;
-    int64_t best_order = INT64_MIN;
+    int64_t best_order = static_cast<int64_t>(LLONG_MIN);
     int best_first = -1;
     int best_second = -1;
 
-    // Only the best cheap pair candidates pay for the full 924-road evaluator.
     #pragma unroll 1
     for (int q = 0; q < TOP_PAIR_K; ++q) {
         const int first = selected_first[q];
