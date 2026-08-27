@@ -8,7 +8,7 @@ constexpr int CANDIDATE_K = 12;
 constexpr int KEEP_K = 4;
 constexpr int REPLY_K = 4;
 
-__global__ void tactical_search_v4_top12_reply4_kernel(
+__global__ void tactical_search_v4_top12_replypair4_kernel(
     const int8_t* __restrict__ boards,
     const int8_t* __restrict__ current_player,
     const int8_t* __restrict__ stones_left,
@@ -199,9 +199,9 @@ __global__ void tactical_search_v4_top12_reply4_kernel(
         return;
     }
 
-    // 3) For each of our TOP4 pairs, use the SAME cheap V2 score_all from the
-    // opponent's perspective to filter all legal cells down to its TOP4 first
-    // stones. Only those four replies receive the expensive full state eval.
+    // 3) For each of our TOP4 pairs, rank every legal opponent cell with the
+    // same cheap V2 score_all, keep its TOP4 cells, then evaluate every unordered
+    // two-stone reply pair from them: C(4,2)=6 legal full-turn candidates.
     int best_pair_value = INVALID_SCORE;
     int64_t best_pair_order = static_cast<int64_t>(LLONG_MIN);
     int best_pair_first = -1;
@@ -221,9 +221,7 @@ __global__ void tactical_search_v4_top12_reply4_kernel(
         }
         __syncthreads();
 
-        // The opponent is at the start of its normal two-stone turn. We only
-        // inspect its first stone in this shallow experiment, but rank that stone
-        // with the normal V2 stones_left=2 semantics.
+        // Opponent starts a normal two-stone Connect6 turn here.
         score_all(board, static_cast<int8_t>(-player), 2, scores);
         __syncthreads();
         if (tid == 0) {
@@ -232,41 +230,48 @@ __global__ void tactical_search_v4_top12_reply4_kernel(
         __syncthreads();
 
         #pragma unroll
-        for (int r = 0; r < REPLY_K; ++r) {
-            const int reply = reply_actions[r];
-            if (reply < 0 || board[reply] != 0) continue;
+        for (int r1 = 0; r1 < REPLY_K; ++r1) {
+            const int reply_first = reply_actions[r1];
+            if (reply_first < 0 || board[reply_first] != 0) continue;
 
-            if (tid == 0) board[reply] = static_cast<int8_t>(-player);
-            __syncthreads();
+            #pragma unroll
+            for (int r2 = r1 + 1; r2 < REPLY_K; ++r2) {
+                const int reply_second = reply_actions[r2];
+                if (reply_second < 0 || board[reply_second] != 0) continue;
 
-            // side_to_move=0 deliberately asks for a neutral board-state score.
-            // We stop after only one opponent stone, so pretending that a fresh
-            // full two-stone turn starts here would distort STATE_IMMEDIATE.
-            const int leaf = evaluate_state_parallel(
-                board,
-                player,
-                static_cast<int8_t>(0),
-                reduce,
-                my_ta,
-                my_tb,
-                opp_ta,
-                opp_tb,
-                &my_threat_count,
-                &opp_threat_count,
-                &my_overflow,
-                &opp_overflow,
-                &my_win,
-                &opp_win,
-                &eval_result);
+                if (tid == 0) {
+                    board[reply_first] = static_cast<int8_t>(-player);
+                    board[reply_second] = static_cast<int8_t>(-player);
+                }
+                __syncthreads();
 
-            if (tid == 0) {
-                if (!reply_seen || leaf < reply_worst) reply_worst = leaf;
-                reply_seen = 1;
-                board[reply] = 0;
+                // This is now a complete opponent turn, so if the game is still
+                // live the next side to move is us with a fresh two-stone turn.
+                const int leaf = evaluate_state_parallel(
+                    board,
+                    player,
+                    player,
+                    reduce,
+                    my_ta,
+                    my_tb,
+                    opp_ta,
+                    opp_tb,
+                    &my_threat_count,
+                    &opp_threat_count,
+                    &my_overflow,
+                    &opp_overflow,
+                    &my_win,
+                    &opp_win,
+                    &eval_result);
+
+                if (tid == 0) {
+                    if (!reply_seen || leaf < reply_worst) reply_worst = leaf;
+                    reply_seen = 1;
+                    board[reply_first] = 0;
+                    board[reply_second] = 0;
+                }
+                __syncthreads();
             }
-            __syncthreads();
-
-            if (reply_worst <= -STATE_WIN) break;
         }
 
         if (tid == 0) {
@@ -308,7 +313,7 @@ __global__ void tactical_search_v4_top12_reply4_kernel(
 
 }  // namespace
 
-extern "C" cudaError_t launch_tactical_bot_v4_top12_reply4_cuda(
+extern "C" cudaError_t launch_tactical_bot_v4_top12_replypair4_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -317,7 +322,7 @@ extern "C" cudaError_t launch_tactical_bot_v4_top12_reply4_cuda(
     int batch,
     cudaStream_t stream) {
     if (batch <= 0) return cudaSuccess;
-    tactical_search_v4_top12_reply4_kernel<<<batch, v4_detail::THREADS, 0, stream>>>(
+    tactical_search_v4_top12_replypair4_kernel<<<batch, v4_detail::THREADS, 0, stream>>>(
         boards,
         current_player,
         stones_left,
