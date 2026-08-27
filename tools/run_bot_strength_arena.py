@@ -10,18 +10,19 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV3,
-    GPUTacticalBotSmall,
     GPUTacticalBotV4,
     GPUTacticalBotFullPair,
+    GPUTacticalBotPairFirst,
+    GPUTacticalBotLiveRoad,
 )
 from connect6.championship import bot_arena as _model_arena
 from connect6.evaluation import bot_strength_arena as _base
 from connect6.evaluation import cloudict_arena as _cloudict
 
 
-# Full Pair is a normal arena participant here, exactly like every other bot.
-# The config decides which registered bots run through all three standard stages:
-# CNN gauntlet, full bot-vs-bot round robin, then Cloudict.
+# All registered bots below are normal arena participants. The config decides
+# which ones run through the same three stages: CNN gauntlet, full round-robin,
+# then Cloudict. Small TOP12 is intentionally no longer part of this test set.
 _base.BOT_SPECS = (
     _model_arena.BotSpec(
         "v1",
@@ -42,16 +43,22 @@ _base.BOT_SPECS = (
         GPUTacticalBotV3,
     ),
     _model_arena.BotSpec(
-        "small",
-        "GPU Tactical Bot Small Top12 Pair-State",
-        "gpu_tactical_bot_small_top12_pair_state_v1",
-        GPUTacticalBotSmall,
-    ),
-    _model_arena.BotSpec(
         "v4",
         "GPU Tactical Bot V4 Top12 ReplyPair6",
         "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1",
         GPUTacticalBotV4,
+    ),
+    _model_arena.BotSpec(
+        "pair",
+        "GPU Tactical Bot PairFirst AllPairs P128",
+        "gpu_tactical_bot_pairfirst_allpairs_p128_v1",
+        GPUTacticalBotPairFirst,
+    ),
+    _model_arena.BotSpec(
+        "live",
+        "GPU Tactical Bot LiveRoad Brute Force",
+        "gpu_tactical_bot_liveroad_ge2_min16_bruteforce_v1",
+        GPUTacticalBotLiveRoad,
     ),
     _model_arena.BotSpec(
         "full",
@@ -64,8 +71,7 @@ _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
 
 
 # In bot-vs-bot, draws are diagnostic but should not pull every comparison
-# toward 50%. The reported score is therefore the win share among DECISIVE
-# games only: wins / (wins + losses). W/D/L and total games remain unchanged.
+# toward 50%. Report the win share among decisive games: wins/(wins+losses).
 def _decisive_pair_rows(pair_rows):
     converted = []
     for raw in pair_rows:
