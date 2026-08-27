@@ -10,6 +10,7 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV3,
+    GPUTacticalBotSmall,
     GPUTacticalBotV4,
 )
 from connect6.championship import bot_arena as _model_arena
@@ -17,11 +18,6 @@ from connect6.evaluation import bot_strength_arena as _base
 from connect6.evaluation import cloudict_arena as _cloudict
 
 
-# Register the current experimental ladder explicitly. V3 is the former V4
-# TOP16/120-pair no-reply algorithm. V4 widens its own search to TOP12/66 pairs,
-# keeps TOP4 own pairs, then uses V2 from the opponent perspective to keep its
-# TOP4 cells and evaluates all C(4,2)=6 full two-stone reply pairs.
-# New signatures prevent historical V3/V4 CSV/state from being reused.
 _base.BOT_SPECS = (
     _model_arena.BotSpec(
         "v1",
@@ -42,18 +38,21 @@ _base.BOT_SPECS = (
         GPUTacticalBotV3,
     ),
     _model_arena.BotSpec(
+        "small",
+        "GPU Tactical Bot Small Top12 Pair-State",
+        "gpu_tactical_bot_small_top12_pair_state_v1",
+        GPUTacticalBotSmall,
+    ),
+    _model_arena.BotSpec(
         "v4",
-        "GPU Tactical Bot V4 Top12 ReplyPair4",
-        "gpu_tactical_bot_v4_top12_pair_top4_v2reply4_pairs_v1",
+        "GPU Tactical Bot V4 Top12 ReplyPair6",
+        "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1",
         GPUTacticalBotV4,
     ),
 )
 _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
 
 
-# In bot-vs-bot, draws are diagnostic but should not pull every comparison
-# toward 50%. The reported score is therefore the win share among DECISIVE
-# games only: wins / (wins + losses). W/D/L and total games remain unchanged.
 def _decisive_pair_rows(pair_rows):
     converted = []
     for raw in pair_rows:
@@ -64,14 +63,12 @@ def _decisive_pair_rows(pair_rows):
         except (TypeError, ValueError):
             converted.append(row)
             continue
-
         decisive = a_wins + b_wins
         if decisive > 0:
             a_pct = 100.0 * a_wins / decisive
             b_pct = 100.0 * b_wins / decisive
         else:
             a_pct = b_pct = 50.0
-
         row["a_score_pct"] = f"{a_pct:.3f}"
         row["b_score_pct"] = f"{b_pct:.3f}"
         converted.append(row)
@@ -183,19 +180,13 @@ class _SymmetricRetryCloudictEngine(_OriginalCloudictEngine):
         self._protocol_symmetry = type(self)._engine_serial % 8
         type(self)._engine_serial += 1
         super().__init__(*args, **kwargs)
-        print(
-            f"[CLOUDICT] engine symmetry #{self._protocol_symmetry}",
-            flush=True,
-        )
+        print(f"[CLOUDICT] engine symmetry #{self._protocol_symmetry}", flush=True)
 
     def _reply_to_local(self, reply):
         if reply is None:
             return None
         return _cloudict.SearchReply(
-            move=_transform_move(
-                reply.move,
-                _inverse_symmetry(self._protocol_symmetry),
-            ),
+            move=_transform_move(reply.move, _inverse_symmetry(self._protocol_symmetry)),
             elapsed_seconds=reply.elapsed_seconds,
         )
 
@@ -207,9 +198,7 @@ class _SymmetricRetryCloudictEngine(_OriginalCloudictEngine):
         return self._reply_to_local(reply)
 
     def respond(self, opponent_move: str):
-        reply = super().respond(
-            _transform_move(opponent_move, self._protocol_symmetry)
-        )
+        reply = super().respond(_transform_move(opponent_move, self._protocol_symmetry))
         return self._reply_to_local(reply)
 
 
