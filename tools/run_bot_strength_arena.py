@@ -40,8 +40,8 @@ _base.BOT_SPECS = (
     ),
     _model_arena.BotSpec(
         "v4",
-        "GPU Tactical Bot V4 Top32 Pair-State",
-        "gpu_tactical_bot_v4_top32_pair_state_v1",
+        "GPU Tactical Bot V4 Top16 Pair-State",
+        "gpu_tactical_bot_v4_top16_pair_state_v1",
         GPUTacticalBotV4,
     ),
 )
