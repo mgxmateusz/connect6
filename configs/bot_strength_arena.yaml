@@ -4,7 +4,7 @@ bot_strength_arena:
   device: "cuda"
 
   # V3 = narrower pair-state + full opponent turn.
-  # V4 = TOP32 current-position cells -> all 496 own pairs, no opponent reply.
+  # V4 = TOP16 current-position cells -> all 120 own pairs, no opponent reply.
   bots: ["v1", "v2", "v3", "v4"]
 
   # Etap 1 FAST: checkpointy są pakowane raz do natywnego layoutu FP16/WMMA.
