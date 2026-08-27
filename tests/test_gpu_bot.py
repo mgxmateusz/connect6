@@ -2,7 +2,12 @@ import pytest
 import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
-from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2, GPUTacticalBotV3
+from connect6.bots.gpu_bot import (
+    GPUTacticalBot,
+    GPUTacticalBotV2,
+    GPUTacticalBotV3,
+    GPUTacticalBotV4,
+)
 
 
 pytestmark = pytest.mark.skipif(
@@ -13,6 +18,11 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(params=[GPUTacticalBot, GPUTacticalBotV2], ids=["v1", "v2"])
 def bot_cls(request):
+    return request.param
+
+
+@pytest.fixture(params=[GPUTacticalBotV3, GPUTacticalBotV4], ids=["v3", "v4"])
+def search_bot_cls(request):
     return request.param
 
 
@@ -76,8 +86,8 @@ def test_gpu_bots_first_stone_sets_up_two_stone_win(bot_cls):
     assert found
 
 
-def test_v3_plans_and_caches_second_stone_on_gpu():
-    bot = GPUTacticalBotV3("cuda")
+def test_search_bots_plan_and_cache_second_stone_on_gpu(search_bot_cls):
+    bot = search_bot_cls("cuda")
     board = torch.zeros((1, 19, 19), dtype=torch.int8, device="cuda")
     board[0, 8, 6:10] = 1
     player = torch.ones(1, dtype=torch.int8, device="cuda")
@@ -96,8 +106,8 @@ def test_v3_plans_and_caches_second_stone_on_gpu():
     assert int(board.view(-1)[second].item()) == 0
 
 
-def test_v3_takes_immediate_win_on_first_stone():
-    bot = GPUTacticalBotV3("cuda")
+def test_search_bots_take_immediate_win_on_first_stone(search_bot_cls):
+    bot = search_bot_cls("cuda")
     board = torch.zeros((1, 19, 19), dtype=torch.int8, device="cuda")
     board[0, 9, 4:9] = 1
     player = torch.ones(1, dtype=torch.int8, device="cuda")
