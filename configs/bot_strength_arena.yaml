@@ -1,10 +1,11 @@
 bot_strength_arena:
   checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
-  output_dir: "runs/connect6_cnn_05/bot_strength_arena_v3_top16_v4_top12_reply4"
+  output_dir: "runs/connect6_cnn_05/bot_strength_arena_v3_top16_v4_top12_replypair4"
   device: "cuda"
 
   # V3 = former V4: TOP16 current-position cells -> all 120 own pairs, no reply.
-  # V4 = TOP12 -> 66 own pairs -> TOP4 own pairs -> opponent V2 TOP4 single replies.
+  # V4 = TOP12 -> 66 own pairs -> TOP4 own pairs -> opponent V2 TOP4 cells
+  #      -> all C(4,2)=6 full two-stone opponent reply pairs.
   bots: ["v1", "v2", "v3", "v4"]
 
   # Etap 1 FAST: checkpointy są pakowane raz do natywnego layoutu FP16/WMMA.
