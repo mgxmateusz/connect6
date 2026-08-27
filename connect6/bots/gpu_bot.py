@@ -13,6 +13,7 @@ GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top12 ReplyPair6"
 GPU_TACTICAL_BOT_FULL_PAIR = "GPU Tactical Bot Full Pair Brute Force"
 GPU_TACTICAL_BOT_PAIRFIRST = "GPU Tactical Bot PairFirst AllPairs P128"
 GPU_TACTICAL_BOT_LIVEROAD = "GPU Tactical Bot LiveRoad Brute Force"
+GPU_TACTICAL_BOT_HYBRID = "GPU Tactical Bot Hybrid LiveRoad Pair128"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -170,6 +171,19 @@ class GPUTacticalBotLiveRoad(_SearchGPUTacticalBot):
     label = GPU_TACTICAL_BOT_LIVEROAD
 
 
+class GPUTacticalBotHybrid(_SearchGPUTacticalBot):
+    """Pure hybrid: LiveRoad pool -> pair-aware cheap score -> global TOP128 exact.
+
+    The normal two-stone search uses only empty cells from clean own/opponent
+    six-roads containing at least two stones. It adds no V2/TOP-k safety-net
+    cells. Every unordered pair inside that structural pool gets the same cheap
+    pair-aware score as PairFirst; global TOP128 then reaches the exact evaluator.
+    """
+
+    entrypoint = "tactical_bot_hybrid_actions"
+    label = GPU_TACTICAL_BOT_HYBRID
+
+
 # Compatibility name used by older arena modules.
 GPUTacticalBotV4B8x2 = GPUTacticalBotV4
 
@@ -178,7 +192,8 @@ class GPUTacticalBotV5B8x4(GPUTacticalBotV3):
     def __init__(self, *args, **kwargs):
         raise RuntimeError(
             "GPU Tactical Bot V5 D3 B8x4 was removed. Use GPUTacticalBotV3, "
-            "GPUTacticalBotV4, GPUTacticalBotPairFirst or GPUTacticalBotLiveRoad."
+            "GPUTacticalBotV4, GPUTacticalBotPairFirst, GPUTacticalBotLiveRoad "
+            "or GPUTacticalBotHybrid."
         )
 
 
@@ -204,4 +219,6 @@ def create_gpu_tactical_bot(
         return GPUTacticalBotPairFirst(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_LIVEROAD:
         return GPUTacticalBotLiveRoad(device, verbose_build=verbose_build)
+    if label == GPU_TACTICAL_BOT_HYBRID:
+        return GPUTacticalBotHybrid(device, verbose_build=verbose_build)
     raise ValueError(f"Unknown GPU tactical bot: {label}")
