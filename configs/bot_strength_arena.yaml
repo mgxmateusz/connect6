@@ -1,19 +1,18 @@
 bot_strength_arena:
   checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
-  output_dir: "runs/connect6_cnn_05/bot_strength_arena_with_full_pair"
+  output_dir: "runs/connect6_cnn_05/bot_strength_arena_pairfirst_liveroad"
   device: "cuda"
 
-  # V3 = TOP16 -> 120 own pairs, no reply.
-  # Small = TOP12 -> 66 own pairs, no reply. Pure width-control experiment.
-  # V4 = TOP12 -> 66 own pairs -> TOP4 own pairs -> opponent V2 TOP6 cells
-  #      -> all C(6,2)=15 full two-stone opponent reply pairs.
-  # Full = exhaustive reference: every legal unordered own pair C(E,2),
-  #        using the same pair-state evaluator as V3/Small.
-  # Every bot below is treated identically by the arena:
-  # 1) every CNN checkpoint vs every bot,
-  # 2) full bot-vs-bot round robin,
-  # 3) every bot vs Cloudict D2/D3/D4.
-  bots: ["v1", "v2", "v3", "small", "v4", "full"]
+  # V3 = TOP16 -> C(16,2)=120 exact own pairs, no reply search.
+  # V4 = TOP12 -> 66 exact own pairs -> TOP4 -> opponent V2 TOP6
+  #      -> all C(6,2)=15 full two-stone reply pairs per finalist.
+  # Pair = every legal own pair gets a cheap pair-aware score -> TOP128 pairs
+  #        -> the same exact 924-road state evaluator as V3/Full.
+  # Live = every empty cell from every clean own/opponent road with >=2 stones;
+  #        minimum pool width 16; exact brute force over every pair in the pool.
+  # Full = exhaustive exact reference over every legal unordered pair C(E,2).
+  # Small TOP12 is intentionally removed from the current experiment.
+  bots: ["v1", "v2", "v3", "v4", "pair", "live", "full"]
 
   models_per_batch: 512
   native_load_chunk_models: 32
@@ -26,9 +25,12 @@ bot_strength_arena:
     executable: "C:\\PRACA\\ConnectMore\\engines\\cloudict.exe"
     depths: [2, 3, 4]
     opening_sizes:
+      # D2/D3 stay unchanged: center 3x3 = 9 openings x 2 colours = 18 games.
       2: 3
       3: 3
-      4: 3
+      # D4 is deliberately reduced to the exact center only: 1 opening x
+      # 2 colours = 2 games per bot, because D4 is dramatically slower.
+      4: 1
     vcf: false
     timeout_seconds: 60.0
     # <= 0 = unlimited retries, but only for known recoverable crash/timeout errors.
