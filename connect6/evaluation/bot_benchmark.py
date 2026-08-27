@@ -43,7 +43,6 @@ def _parse_batch_sizes(raw: str) -> list[int]:
 def _validate_stone_range(min_stones: int, max_stones: int) -> None:
     if min_stones < 1 or max_stones >= 361 or min_stones > max_stones:
         raise ValueError("stone range must satisfy 1 <= min <= max < 361")
-    # A completed Connect6 turn starts after 1 + 2*n stones, hence an odd count.
     if min_stones % 2 == 0 or max_stones % 2 == 0:
         raise ValueError("--min-stones and --max-stones must be odd turn-start counts")
 
@@ -74,14 +73,7 @@ def _make_legal_positions(
     max_stones: int,
     seed: int,
 ):
-    """Generate legal, non-terminal Connect6 positions at a two-stone turn start.
-
-    Positions come from actual VectorConnect6 trajectories. Random legal actions
-    are played under the normal 1-stone opening / 2-stone turn rules. If a game
-    ends before its sampled target move count, that environment is restarted.
-    A position is captured only when it is live, stones_left == 2, and therefore
-    contains no already-completed six.
-    """
+    """Generate legal, non-terminal Connect6 positions at a two-stone turn start."""
     torch.manual_seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
@@ -94,20 +86,15 @@ def _make_legal_positions(
         debug_checks=False,
     )
 
-    targets = _sample_turn_start_targets(
-        batch, device, min_stones, max_stones
-    )
+    targets = _sample_turn_start_targets(batch, device, min_stones, max_stones)
     captured = torch.zeros(batch, dtype=torch.bool, device=device)
     out_boards = torch.empty_like(env.boards)
     out_players = torch.empty_like(env.current_player)
     out_counts = torch.empty(batch, dtype=torch.int16, device=device)
 
-    # Random legal trajectories can occasionally terminate early; restarts keep
-    # generating until every requested benchmark position is live at its target.
     max_generation_steps = max(4096, max_stones * 40)
     for _ in range(max_generation_steps):
         legal = env.legal_mask()
-        # i.i.d. random scores + argmax is a uniform random choice over legal cells.
         random_scores = torch.rand(
             (batch, env.action_size), dtype=torch.float32, device=device
         )
@@ -146,9 +133,7 @@ def _make_legal_positions(
             f"Could not generate {missing}/{batch} legal benchmark positions"
         )
 
-    stones_left = torch.full(
-        (batch,), 2, dtype=torch.int8, device=device
-    )
+    stones_left = torch.full((batch,), 2, dtype=torch.int8, device=device)
     return out_boards, out_players, stones_left, out_counts
 
 
@@ -273,12 +258,12 @@ def main() -> None:
     print("V1/V2 timing: one native CUDA scoring decision at stones_left=2.")
     print("V3: TOP16 current cells -> all C(16,2)=120 pair states; no reply search.")
     print(
-        "V4: TOP8 current cells -> all C(8,2)=28 pair states -> TOP4 pairs -> "
+        "V4: TOP8 current cells -> all C(8,2)=28 pair states -> TOP3 pairs -> "
         "every legal one-stone opponent reply -> maximin."
     )
     print(
         "V3 work: 1 score_all + 120 state evals. V4 work: 1 score_all + 28 own "
-        "state evals + up to 4*(legal opponent cells) reply state evals."
+        "state evals + up to 3*(legal opponent cells) reply state evals."
     )
     print("Ratios are always bot_ms / CNN_ms; lower is faster relative to CNN.")
     print()
