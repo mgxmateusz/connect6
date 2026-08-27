@@ -29,7 +29,7 @@ extern "C" cudaError_t launch_tactical_bot_v3_top16_cuda(
     int batch,
     cudaStream_t stream);
 
-extern "C" cudaError_t launch_tactical_bot_v4_top12_reply4_cuda(
+extern "C" cudaError_t launch_tactical_bot_v4_top12_replypair4_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -219,8 +219,8 @@ torch::Tensor tactical_bot_v4_actions(
         current_player,
         stones_left,
         pending_second,
-        launch_tactical_bot_v4_top12_reply4_cuda,
-        "GPU Tactical Bot V4 Top12 Reply4");
+        launch_tactical_bot_v4_top12_replypair4_cuda,
+        "GPU Tactical Bot V4 Top12 ReplyPair4");
 }
 
 
@@ -240,5 +240,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "tactical_bot_v4_actions",
         &tactical_bot_v4_actions,
-        "Connect6 GPU Tactical Bot V4 top12/top4 filtered one-stone reply actions");
+        "Connect6 GPU Tactical Bot V4 top12/top4 with full two-stone opponent reply pairs");
 }
