@@ -220,7 +220,7 @@ torch::Tensor tactical_bot_v4_actions(
         stones_left,
         pending_second,
         launch_tactical_bot_v4_top8_reply1_cuda,
-        "GPU Tactical Bot V4 Top8 Reply1");
+        "GPU Tactical Bot V4 Top8 Reply1 Top3");
 }
 
 
@@ -240,5 +240,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "tactical_bot_v4_actions",
         &tactical_bot_v4_actions,
-        "Connect6 GPU Tactical Bot V4 top8 pair-state plus one-stone reply actions");
+        "Connect6 GPU Tactical Bot V4 top8/top3 pair-state plus one-stone reply actions");
 }
