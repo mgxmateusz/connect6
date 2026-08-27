@@ -20,7 +20,7 @@ extern "C" cudaError_t launch_tactical_bot_v2_cuda(
     int batch,
     cudaStream_t stream);
 
-extern "C" cudaError_t launch_tactical_bot_v3_cuda(
+extern "C" cudaError_t launch_tactical_bot_v3_top16_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -29,7 +29,7 @@ extern "C" cudaError_t launch_tactical_bot_v3_cuda(
     int batch,
     cudaStream_t stream);
 
-extern "C" cudaError_t launch_tactical_bot_v4_top16_cuda(
+extern "C" cudaError_t launch_tactical_bot_v4_top8_reply1_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -138,9 +138,7 @@ torch::Tensor tactical_search_actions_impl(
     TORCH_CHECK(
         pending_second.device() == boards.device(),
         "pending_second and boards must be on the same CUDA device");
-    TORCH_CHECK(
-        pending_second.is_contiguous(),
-        "pending_second must be contiguous");
+    TORCH_CHECK(pending_second.is_contiguous(), "pending_second must be contiguous");
 
     auto boards_c = boards.contiguous();
     auto player_c = current_player.contiguous();
@@ -206,8 +204,8 @@ torch::Tensor tactical_bot_v3_actions(
         current_player,
         stones_left,
         pending_second,
-        launch_tactical_bot_v3_cuda,
-        "GPU Tactical Bot V3 Pair-State");
+        launch_tactical_bot_v3_top16_cuda,
+        "GPU Tactical Bot V3 Top16 Pair-State");
 }
 
 
@@ -221,8 +219,8 @@ torch::Tensor tactical_bot_v4_actions(
         current_player,
         stones_left,
         pending_second,
-        launch_tactical_bot_v4_top16_cuda,
-        "GPU Tactical Bot V4 Top16 Pair-State");
+        launch_tactical_bot_v4_top8_reply1_cuda,
+        "GPU Tactical Bot V4 Top8 Reply1");
 }
 
 
@@ -238,9 +236,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "tactical_bot_v3_actions",
         &tactical_bot_v3_actions,
-        "Connect6 GPU Tactical Bot V3 pair-state/full-turn actions");
+        "Connect6 GPU Tactical Bot V3 top16 pair-state actions");
     m.def(
         "tactical_bot_v4_actions",
         &tactical_bot_v4_actions,
-        "Connect6 GPU Tactical Bot V4 top16 pair-state actions");
+        "Connect6 GPU Tactical Bot V4 top8 pair-state plus one-stone reply actions");
 }
