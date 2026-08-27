@@ -16,8 +16,23 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBotLiveRoad,
 )
 from connect6.championship import bot_arena as _model_arena
+from connect6.championship import championship as _legacy
 from connect6.evaluation import bot_strength_arena as _base
 from connect6.evaluation import cloudict_arena as _cloudict
+
+
+# The CNN gauntlet intentionally uses only even-numbered autosaves:
+# model_update_00000002.pt, 00000004.pt, ... . Bot-vs-bot and Cloudict do not
+# use discover_checkpoints(), so they are unaffected by this filter.
+_OriginalDiscoverCheckpoints = _legacy.discover_checkpoints
+
+
+def _discover_even_checkpoints(directory):
+    refs = _OriginalDiscoverCheckpoints(directory)
+    return [ref for ref in refs if int(ref.update) % 2 == 0]
+
+
+_legacy.discover_checkpoints = _discover_even_checkpoints
 
 
 # All registered bots below are normal arena participants. The config decides
