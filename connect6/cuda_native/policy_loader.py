@@ -36,7 +36,7 @@ def load_native_policy_extension(*, verbose: bool = False):
         str(root / "native_policy.cpp"),
         str(root / "native_policy_kernel.cu"),
     ]
-    extension_name = "connect6_cuda_policy_sm120_v1"
+    extension_name = "connect6_cuda_policy_sm120_v2"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -55,6 +55,7 @@ def load_native_policy_extension(*, verbose: bool = False):
         cflags = ["/O2", "/std:c++17"] if is_windows else ["-O3", "-std=c++17"]
         cuda_flags = [
             "-O3",
+            "-DUSE_CUDA",
             "--use_fast_math",
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
