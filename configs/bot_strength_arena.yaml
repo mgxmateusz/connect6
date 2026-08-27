@@ -1,15 +1,19 @@
 bot_strength_arena:
   checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
-  output_dir: "runs/connect6_cnn_05/bot_strength_arena_small_top12_v4_replypair6"
+  output_dir: "runs/connect6_cnn_05/bot_strength_arena_with_full_pair"
   device: "cuda"
 
   # V3 = TOP16 -> 120 own pairs, no reply.
   # Small = TOP12 -> 66 own pairs, no reply. Pure width-control experiment.
   # V4 = TOP12 -> 66 own pairs -> TOP4 own pairs -> opponent V2 TOP6 cells
   #      -> all C(6,2)=15 full two-stone opponent reply pairs.
-  # Full Pair Brute Force is benchmark-only and is injected by
-  # tools/run_bot_strength_arena.py only into the V3-vs-FULL reference match.
-  bots: ["v1", "v2", "v3", "small", "v4"]
+  # Full = exhaustive reference: every legal unordered own pair C(E,2),
+  #        using the same pair-state evaluator as V3/Small.
+  # Every bot below is treated identically by the arena:
+  # 1) every CNN checkpoint vs every bot,
+  # 2) full bot-vs-bot round robin,
+  # 3) every bot vs Cloudict D2/D3/D4.
+  bots: ["v1", "v2", "v3", "small", "v4", "full"]
 
   models_per_batch: 512
   native_load_chunk_models: 32
