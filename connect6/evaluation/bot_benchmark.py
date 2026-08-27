@@ -9,8 +9,10 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV3,
-    GPUTacticalBotSmall,
     GPUTacticalBotV4,
+    GPUTacticalBotFullPair,
+    GPUTacticalBotPairFirst,
+    GPUTacticalBotLiveRoad,
 )
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
@@ -127,6 +129,18 @@ def main() -> None:
     parser.add_argument("--batch-sizes", default="1,32,128,256,512,1024,2048")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=2000)
+    parser.add_argument(
+        "--heavy-iters",
+        type=int,
+        default=10,
+        help="Iterations for very expensive LiveRoad/Full timings (mean ms is still comparable).",
+    )
+    parser.add_argument(
+        "--heavy-warmup",
+        type=int,
+        default=1,
+        help="Warmup iterations for very expensive LiveRoad/Full timings.",
+    )
     parser.add_argument("--min-stones", type=int, default=41)
     parser.add_argument("--max-stones", type=int, default=81)
     parser.add_argument("--position-seed", type=int, default=12345)
@@ -134,6 +148,8 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         raise RuntimeError("This benchmark requires CUDA")
+    if args.iters <= 0 or args.warmup < 0 or args.heavy_iters <= 0 or args.heavy_warmup < 0:
+        raise ValueError("iteration counts must be positive and warmups non-negative")
     _validate_stone_range(args.min_stones, args.max_stones)
     device = torch.device("cuda")
     checkpoint = args.checkpoint or _find_checkpoint(args.runs_dir)
@@ -142,8 +158,10 @@ def main() -> None:
     bot_v1 = GPUTacticalBot(device)
     bot_v2 = GPUTacticalBotV2(device)
     bot_v3 = GPUTacticalBotV3(device)
-    bot_small = GPUTacticalBotSmall(device)
     bot_v4 = GPUTacticalBotV4(device)
+    bot_pair = GPUTacticalBotPairFirst(device)
+    bot_live = GPUTacticalBotLiveRoad(device)
+    bot_full = GPUTacticalBotFullPair(device)
 
     tr_cfg = payload.get("config", {}).get("training", {})
     amp_enabled = bool(tr_cfg.get("amp", True))
@@ -156,7 +174,7 @@ def main() -> None:
     seed_left_two = torch.full((1,), 2, dtype=torch.int8, device=device)
     bot_v1.actions(seed_board, seed_player, seed_left_one)
     bot_v2.actions(seed_board, seed_player, seed_left_one)
-    for bot in (bot_v3, bot_small, bot_v4):
+    for bot in (bot_v3, bot_v4, bot_pair, bot_live, bot_full):
         bot.reset()
         bot.actions(seed_board, seed_player, seed_left_two)
         bot.actions(seed_board, seed_player, seed_left_one)
@@ -164,16 +182,22 @@ def main() -> None:
 
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"Checkpoint: {checkpoint}")
-    print("V3: TOP16 -> C(16,2)=120 states, no reply.")
-    print("Small: TOP12 -> C(12,2)=66 states, no reply.")
-    print("V4: TOP12 -> 66 own states -> TOP4 -> opponent V2 TOP6 -> C(6,2)=15 reply pairs each.")
-    print("V4 full state evals: 66 + 4*15 = 126; V3 = 120; Small = 66.")
+    print("V3: TOP16 cells -> C(16,2)=120 exact states, no reply.")
+    print("V4: TOP12 -> 66 own exact -> TOP4 -> opponent TOP6 -> 4*C(6,2)=60 exact replies; total=126.")
+    print("Pair: every legal pair cheap pair-aware score -> TOP128 -> 128 exact states.")
+    print("Live: all pairs from live-road cell pool -> exact state for every retained pair; pool is at least 16 cells.")
+    print("Full: every legal C(E,2) pair -> exact state for every pair.")
+    print(
+        f"Regular timing: warmup={args.warmup}, iters={args.iters}; "
+        f"heavy Live/Full timing: warmup={args.heavy_warmup}, iters={args.heavy_iters}."
+    )
     print()
     print(
         f"{'batch':>6} | {'stones':>11} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
-        f"{'V3 Top16':>10} | {'Small T12':>10} | {'V4 T12/P6':>10} | {'V3/CNN':>7} | {'Sm/CNN':>7} | {'V4/CNN':>7}"
+        f"{'V3 ms':>9} | {'V4 ms':>9} | {'Pair P128':>10} | {'LiveRoad':>10} | {'Full':>10} | "
+        f"{'Pair/CNN':>8} | {'Live/CNN':>8} | {'Full/CNN':>8}"
     )
-    print("-" * 128)
+    print("-" * 156)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left, stone_counts = _make_legal_positions(
@@ -192,13 +216,27 @@ def main() -> None:
         v1_ms = _elapsed_ms(lambda: bot_v1.actions(boards, players, left), args.warmup, args.iters)
         v2_ms = _elapsed_ms(lambda: bot_v2.actions(boards, players, left), args.warmup, args.iters)
         v3_ms = _elapsed_search_avg_decision_ms(bot_v3, boards, players, warmup=args.warmup, iterations=args.iters)
-        small_ms = _elapsed_search_avg_decision_ms(bot_small, boards, players, warmup=args.warmup, iterations=args.iters)
         v4_ms = _elapsed_search_avg_decision_ms(bot_v4, boards, players, warmup=args.warmup, iterations=args.iters)
+        pair_ms = _elapsed_search_avg_decision_ms(bot_pair, boards, players, warmup=args.warmup, iterations=args.iters)
+        live_ms = _elapsed_search_avg_decision_ms(
+            bot_live,
+            boards,
+            players,
+            warmup=args.heavy_warmup,
+            iterations=args.heavy_iters,
+        )
+        full_ms = _elapsed_search_avg_decision_ms(
+            bot_full,
+            boards,
+            players,
+            warmup=args.heavy_warmup,
+            iterations=args.heavy_iters,
+        )
 
         print(
             f"{batch:6d} | {stone_label:>11} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
-            f"{v3_ms:10.4f} | {small_ms:10.4f} | {v4_ms:10.4f} | "
-            f"{v3_ms/model_ms:7.3f} | {small_ms/model_ms:7.3f} | {v4_ms/model_ms:7.3f}"
+            f"{v3_ms:9.4f} | {v4_ms:9.4f} | {pair_ms:10.4f} | {live_ms:10.4f} | {full_ms:10.4f} | "
+            f"{pair_ms/model_ms:8.3f} | {live_ms/model_ms:8.3f} | {full_ms/model_ms:8.3f}"
         )
 
 
