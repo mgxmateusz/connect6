@@ -349,12 +349,14 @@ def _run_cloudict(
                             )
                             break
                         except (RuntimeError, TimeoutError) as exc:
-                            if not _recoverable_cloudict(exc) or retry >= max_restarts:
+                            limited = max_restarts > 0
+                            if not _recoverable_cloudict(exc) or (limited and retry >= max_restarts):
                                 raise
                             retry += 1
                             engine.close()
                             engine = None
-                            print(f"[CLOUDICT] restart {retry}/{max_restarts}: {exc}")
+                            limit_text = str(max_restarts) if limited else "∞"
+                            print(f"[CLOUDICT] restart {retry}/{limit_text}: {exc}")
                             time.sleep(0.25)
 
                     stored = {
@@ -508,7 +510,8 @@ def run(
     }
     vcf = bool(ccfg.get("vcf", False))
     timeout = float(ccfg.get("timeout_seconds", 60.0))
-    max_restarts = int(ccfg.get("max_restarts", 20))
+    # max_restarts <= 0 means unlimited recoverable Cloudict restarts.
+    max_restarts = int(ccfg.get("max_restarts", 0))
 
     print("=" * 78)
     print("CONNECT6 BOT STRENGTH ARENA")
