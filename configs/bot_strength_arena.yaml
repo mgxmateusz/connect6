@@ -1,25 +1,22 @@
 bot_strength_arena:
   checkpoint_dir: "runs/connect6_cnn_05/checkpoints"
-  output_dir: "runs/connect6_cnn_05/bot_strength_arena"
+  output_dir: "runs/connect6_cnn_05/bot_strength_arena_v3_pair_state"
   device: "cuda"
 
-  # Pełna drabinka aktualnych botów.
-  bots: ["v1", "v2", "v3", "v4", "v5"]
+  # V4/V5 oraz stary V3 D2[8] zostały usunięte.
+  # Nowy V3: V2 move ordering + pair-state evaluator + pełna odpowiedź 2-kamieniowa.
+  bots: ["v1", "v2", "v3"]
 
-  # Etap 1 FAST: wszystkie checkpointy są pakowane raz do natywnego layoutu
-  # FP16/WMMA, a potem grają z botami bez HistoricalPolicyEnsemble/PyTorch forward.
+  # Etap 1 FAST: checkpointy są pakowane raz do natywnego layoutu FP16/WMMA.
   models_per_batch: 512
   native_load_chunk_models: 32
   sync_interval_moves: 16
 
-  # Etap 2: każdy bot z każdym. Wszystkie 361 możliwych pierwszych pól,
-  # a dla każdego pola oba przypisania kolorów = 722 gry na parę botów.
+  # Etap 2: wszystkie 361 wymuszonych pierwszych pól x 2 kolory.
   bot_vs_bot:
     opening_size: 19
 
   # Etap 3: każdy bot osobno przeciw Cloudictowi na D2, D3 i D4.
-  # Rozmiary otwarć są takie jak w istniejącej drabince Cloudicta:
-  # D2 pełne 19x19, D3 środkowe 9x9, D4 środkowe 5x5.
   cloudict:
     executable: "C:\\PRACA\\ConnectMore\\engines\\cloudict.exe"
     depths: [2, 3, 4]

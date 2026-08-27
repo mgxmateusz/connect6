@@ -5,8 +5,38 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2, GPUTacticalBotV3
+from connect6.championship import bot_arena as _model_arena
 from connect6.evaluation import bot_strength_arena as _base
 from connect6.evaluation import cloudict_arena as _cloudict
+
+
+# V4/V5 and the old D2[8] V3 were experimental dead ends. Keep the arena's
+# public implementation untouched, but replace its bot registry before the fast
+# runner imports/uses it. The new V3 signature deliberately differs from the old
+# one so old result/state files can never be resumed as if they belonged to this
+# search algorithm.
+_base.BOT_SPECS = (
+    _model_arena.BotSpec(
+        "v1",
+        "GPU Tactical Bot V1",
+        "gpu_tactical_bot_heuristic_v1",
+        GPUTacticalBot,
+    ),
+    _model_arena.BotSpec(
+        "v2",
+        "GPU Tactical Bot V2",
+        "gpu_tactical_bot_heuristic_v2",
+        GPUTacticalBotV2,
+    ),
+    _model_arena.BotSpec(
+        "v3",
+        "GPU Tactical Bot V3 Pair-State",
+        "gpu_tactical_bot_v3_pair_state_full_turn_v1",
+        GPUTacticalBotV3,
+    ),
+)
+_base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
 
 
 # Cloudict has a known failure mode on some board orientations/openings: its

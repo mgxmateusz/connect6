@@ -8,10 +8,22 @@ constexpr int BOARD = 19;
 constexpr int CELLS = BOARD * BOARD;
 constexpr int THREADS = 256;
 constexpr int WIN = 6;
-constexpr int MAX_ROOT = 8;
-constexpr int MAX_PAIRS = 32;
+constexpr int ROADS = 924;
+
+constexpr int ROOT_K = 8;
+constexpr int SECOND_K = 4;
+constexpr int MAX_PAIRS = ROOT_K * SECOND_K;
+constexpr int OWN_KEEP = 4;
+constexpr int OPP_ROOT_K = 4;
+constexpr int OPP_SECOND_K = 2;
+constexpr int MAX_THREATS = 128;
+
 constexpr int INVALID_SCORE = INT_MIN / 4;
 constexpr int WIN_SCORE = 1000000000;
+
+constexpr int STATE_WIN = 1500000000;
+constexpr int STATE_IMMEDIATE = 1350000000;
+constexpr int STATE_FORCED = 1200000000;
 
 __device__ __forceinline__ bool inside(int r, int c) {
     return static_cast<unsigned>(r) < BOARD && static_cast<unsigned>(c) < BOARD;
@@ -100,6 +112,8 @@ __device__ __forceinline__ int contiguous_after(
     return total;
 }
 
+// V2 is deliberately used only for move ordering in the search.
+// Its high tactical classes mean "this action is urgent", not "this board is good".
 __device__ __forceinline__ int score_cell_v2(
     const int8_t* board,
     int action,
@@ -312,18 +326,294 @@ __device__ __forceinline__ void score_all(
     }
 }
 
-template<int ROOT_K, int SECOND_K, bool DEPTH3>
-__global__ void tactical_search_kernel(
+// -----------------------------------------------------------------------------
+// Full-board evaluator. It scans every contiguous length-6 road exactly once.
+// A threat road contains 4 or 5 stones of one player and no opponent stone.
+// blocker_count is the exact minimum number of stones (capped at 3) required to
+// hit every such road. In Connect6, >=3 means the defender cannot cover all
+// winning-next-turn requirements with its two stones.
+// -----------------------------------------------------------------------------
+
+__device__ __forceinline__ void decode_road(
+    int road,
+    int& start,
+    int& dr,
+    int& dc) {
+    if (road < 266) {
+        const int r = road / 14;
+        const int c = road - r * 14;
+        start = r * BOARD + c;
+        dr = 0;
+        dc = 1;
+        return;
+    }
+    road -= 266;
+    if (road < 266) {
+        const int c = road / 14;
+        const int r = road - c * 14;
+        start = r * BOARD + c;
+        dr = 1;
+        dc = 0;
+        return;
+    }
+    road -= 266;
+    if (road < 196) {
+        const int r = road / 14;
+        const int c = road - r * 14;
+        start = r * BOARD + c;
+        dr = 1;
+        dc = 1;
+        return;
+    }
+    road -= 196;
+    const int r = road / 14;
+    const int c = 5 + (road - r * 14);
+    start = r * BOARD + c;
+    dr = 1;
+    dc = -1;
+}
+
+__device__ __forceinline__ int road_soft_value(int stones, unsigned mask) {
+    if (stones <= 0 || stones >= 6) return 0;
+    const int run = max_run6(mask);
+    const int span = span6(mask);
+    const int compact = stones >= 2 ? (6 - span) : 0;
+    switch (stones) {
+        case 5: return 80000 + run * run * 1400 + compact * 500;
+        case 4: return 12000 + run * run * 650 + compact * 300;
+        case 3: return 1200 + run * run * 180 + compact * 90;
+        case 2: return 80 + run * run * 25 + compact * 12;
+        case 1: return 8;
+        default: return 0;
+    }
+}
+
+__device__ __forceinline__ bool threat_hit(
+    int16_t a,
+    int16_t b,
+    int cell) {
+    return static_cast<int>(a) == cell || static_cast<int>(b) == cell;
+}
+
+__device__ __forceinline__ int blockers_needed_exact(
+    const int16_t* ta,
+    const int16_t* tb,
+    int count,
+    int overflow) {
+    if (count <= 0) return 0;
+    // Overflow is intentionally conservative: never claim a forced >=3 result
+    // from truncated data.
+    if (overflow) return 2;
+    if (count > MAX_THREATS) count = MAX_THREATS;
+
+    const int first_a = static_cast<int>(ta[0]);
+    const int first_b = static_cast<int>(tb[0]);
+    int first_candidates[2] = {first_a, first_b};
+
+    #pragma unroll
+    for (int xi = 0; xi < 2; ++xi) {
+        const int x = first_candidates[xi];
+        if (x < 0) continue;
+        if (xi == 1 && x == first_candidates[0]) continue;
+
+        bool all_x = true;
+        int first_unhit = -1;
+        for (int i = 0; i < count; ++i) {
+            if (!threat_hit(ta[i], tb[i], x)) {
+                all_x = false;
+                first_unhit = i;
+                break;
+            }
+        }
+        if (all_x) return 1;
+
+        int y_candidates[2] = {
+            static_cast<int>(ta[first_unhit]),
+            static_cast<int>(tb[first_unhit])
+        };
+        #pragma unroll
+        for (int yi = 0; yi < 2; ++yi) {
+            const int y = y_candidates[yi];
+            if (y < 0 || y == x) continue;
+            if (yi == 1 && y == y_candidates[0]) continue;
+
+            bool all_xy = true;
+            for (int i = 0; i < count; ++i) {
+                if (!threat_hit(ta[i], tb[i], x) &&
+                    !threat_hit(ta[i], tb[i], y)) {
+                    all_xy = false;
+                    break;
+                }
+            }
+            if (all_xy) return 2;
+        }
+    }
+    return 3;
+}
+
+__device__ __forceinline__ int evaluate_state_parallel(
+    const int8_t* board,
+    int8_t perspective,
+    int8_t side_to_move,
+    int* reduce,
+    int16_t* my_ta,
+    int16_t* my_tb,
+    int16_t* opp_ta,
+    int16_t* opp_tb,
+    int* my_threat_count,
+    int* opp_threat_count,
+    int* my_overflow,
+    int* opp_overflow,
+    int* my_win,
+    int* opp_win,
+    int* result) {
+    const int tid = threadIdx.x;
+    if (tid == 0) {
+        *my_threat_count = 0;
+        *opp_threat_count = 0;
+        *my_overflow = 0;
+        *opp_overflow = 0;
+        *my_win = 0;
+        *opp_win = 0;
+    }
+    __syncthreads();
+
+    int local_soft = 0;
+    for (int road = tid; road < ROADS; road += blockDim.x) {
+        int start, dr, dc;
+        decode_road(road, start, dr, dc);
+
+        int mine = 0;
+        int opp = 0;
+        int empty0 = -1;
+        int empty1 = -1;
+        int empties = 0;
+        unsigned mine_mask = 0;
+        unsigned opp_mask = 0;
+
+        int r = start / BOARD;
+        int c = start - r * BOARD;
+        #pragma unroll
+        for (int k = 0; k < WIN; ++k) {
+            const int idx = (r + k * dr) * BOARD + (c + k * dc);
+            const int8_t v = board[idx];
+            if (v == perspective) {
+                ++mine;
+                mine_mask |= 1u << k;
+            } else if (v == -perspective) {
+                ++opp;
+                opp_mask |= 1u << k;
+            } else {
+                if (empties == 0) empty0 = idx;
+                else if (empties == 1) empty1 = idx;
+                ++empties;
+            }
+        }
+
+        if (mine == WIN) atomicExch(my_win, 1);
+        if (opp == WIN) atomicExch(opp_win, 1);
+
+        if (opp == 0 && mine > 0) {
+            local_soft += road_soft_value(mine, mine_mask);
+            if ((mine == 4 || mine == 5) && empties >= 1 && empties <= 2) {
+                const int slot = atomicAdd(my_threat_count, 1);
+                if (slot < MAX_THREATS) {
+                    my_ta[slot] = static_cast<int16_t>(empty0);
+                    my_tb[slot] = static_cast<int16_t>(empties == 2 ? empty1 : -1);
+                } else {
+                    atomicExch(my_overflow, 1);
+                }
+            }
+        } else if (mine == 0 && opp > 0) {
+            // Slightly defensive soft bias. Hard tactical classes below remain
+            // symmetric and dominate this arithmetic.
+            local_soft -= (road_soft_value(opp, opp_mask) * 11) / 10;
+            if ((opp == 4 || opp == 5) && empties >= 1 && empties <= 2) {
+                const int slot = atomicAdd(opp_threat_count, 1);
+                if (slot < MAX_THREATS) {
+                    opp_ta[slot] = static_cast<int16_t>(empty0);
+                    opp_tb[slot] = static_cast<int16_t>(empties == 2 ? empty1 : -1);
+                } else {
+                    atomicExch(opp_overflow, 1);
+                }
+            }
+        }
+    }
+
+    reduce[tid] = local_soft;
+    __syncthreads();
+    for (int stride = THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) reduce[tid] += reduce[tid + stride];
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        if (*my_win) {
+            *result = STATE_WIN;
+        } else if (*opp_win) {
+            *result = -STATE_WIN;
+        } else {
+            const int mt = *my_threat_count;
+            const int ot = *opp_threat_count;
+            const int mb = blockers_needed_exact(
+                my_ta, my_tb, mt, *my_overflow);
+            const int ob = blockers_needed_exact(
+                opp_ta, opp_tb, ot, *opp_overflow);
+
+            // A clean 4/5-stone road is completable with the two stones of the
+            // side to move. Check this before "forced next turn" pressure.
+            if (side_to_move == perspective && mt > 0) {
+                *result = STATE_IMMEDIATE;
+            } else if (side_to_move == -perspective && ot > 0) {
+                *result = -STATE_IMMEDIATE;
+            } else if (side_to_move == -perspective && mb >= 3) {
+                *result = STATE_FORCED;
+            } else if (side_to_move == perspective && ob >= 3) {
+                *result = -STATE_FORCED;
+            } else {
+                int value = reduce[0];
+
+                if (mb == 2) value += 50000000;
+                else if (mb == 1) value += 12000000;
+
+                if (ob == 2) value -= 55000000;
+                else if (ob == 1) value -= 13500000;
+
+                const int mt_cap = mt < 12 ? mt : 12;
+                const int ot_cap = ot < 12 ? ot : 12;
+                value += mt_cap * 650000;
+                value -= ot_cap * 720000;
+
+                *result = value;
+            }
+        }
+    }
+    __syncthreads();
+    return *result;
+}
+
+__device__ __forceinline__ bool pair_better(
+    int value,
+    int64_t order,
+    int first,
+    int second,
+    int best_value,
+    int64_t best_order,
+    int best_first,
+    int best_second) {
+    if (value != best_value) return value > best_value;
+    if (order != best_order) return order > best_order;
+    if (first != best_first) return first < best_first;
+    return second < best_second;
+}
+
+__global__ void tactical_search_v3_kernel(
     const int8_t* __restrict__ boards,
     const int8_t* __restrict__ current_player,
     const int8_t* __restrict__ stones_left,
     int16_t* __restrict__ pending_second,
     int64_t* __restrict__ actions,
     int batch) {
-    static_assert(ROOT_K <= MAX_ROOT, "ROOT_K exceeds shared root capacity");
-    static_assert(!DEPTH3 || ROOT_K * SECOND_K <= MAX_PAIRS,
-                  "search beam exceeds shared pair capacity");
-
     const int board_id = blockIdx.x;
     if (board_id >= batch) return;
 
@@ -334,16 +624,41 @@ __global__ void tactical_search_kernel(
 
     __shared__ int8_t board[CELLS];
     __shared__ int scores[CELLS];
-    __shared__ int root_actions[MAX_ROOT];
-    __shared__ int root_scores[MAX_ROOT];
+
+    __shared__ int root_actions[ROOT_K];
+    __shared__ int root_scores[ROOT_K];
+
     __shared__ int pair_first[MAX_PAIRS];
     __shared__ int pair_second[MAX_PAIRS];
-    __shared__ int pair_scores[MAX_PAIRS];
-    __shared__ int reply_scores[MAX_PAIRS];
+    __shared__ int pair_state[MAX_PAIRS];
+    __shared__ int64_t pair_order[MAX_PAIRS];
+    __shared__ int pair_count;
+
+    __shared__ int keep_idx[OWN_KEEP];
+    __shared__ int opp_root_actions[OPP_ROOT_K];
+    __shared__ int opp_root_scores[OPP_ROOT_K];
+    __shared__ int opp_second_actions[OPP_SECOND_K];
+    __shared__ int opp_second_scores[OPP_SECOND_K];
+    __shared__ int reply_worst;
+    __shared__ int reply_seen;
+
+    __shared__ int reduce[THREADS];
+    __shared__ int16_t my_ta[MAX_THREATS];
+    __shared__ int16_t my_tb[MAX_THREATS];
+    __shared__ int16_t opp_ta[MAX_THREATS];
+    __shared__ int16_t opp_tb[MAX_THREATS];
+    __shared__ int my_threat_count;
+    __shared__ int opp_threat_count;
+    __shared__ int my_overflow;
+    __shared__ int opp_overflow;
+    __shared__ int my_win;
+    __shared__ int opp_win;
+    __shared__ int eval_result;
+
     __shared__ int selected_first;
     __shared__ int selected_second;
 
-    // Second stone of a previously planned pair: return it without re-searching.
+    // Cached stone #2 from the previous call.
     if (left <= 1) {
         const int cached = static_cast<int>(pending_second[board_id]);
         if (cached >= 0 && cached < CELLS && src[cached] == 0) {
@@ -355,14 +670,13 @@ __global__ void tactical_search_kernel(
         }
         if (tid == 0) pending_second[board_id] = static_cast<int16_t>(-1);
     } else if (tid == 0) {
-        // Any stale cache belongs to an old/aborted turn.
         pending_second[board_id] = static_cast<int16_t>(-1);
     }
 
     for (int i = tid; i < CELLS; i += blockDim.x) board[i] = src[i];
     __syncthreads();
 
-    // Opening/single-stone fallback or cache miss: normal greedy V2.
+    // Opening/single-stone fallback or cache miss: greedy V2.
     if (left <= 1) {
         score_all(board, player, left, scores);
         __syncthreads();
@@ -375,16 +689,33 @@ __global__ void tactical_search_kernel(
         return;
     }
 
-    // Ply 1: score all legal first stones and keep ROOT_K.
+    // 1) V2 move ordering for the first stone.
     score_all(board, player, 2, scores);
     __syncthreads();
     if (tid == 0) {
         select_top_k_serial<ROOT_K>(scores, root_actions, root_scores);
+        pair_count = 0;
+
+        // A win on stone #1 ends the game before any cached second stone exists.
+        if (root_actions[0] >= 0 && root_scores[0] >= WIN_SCORE) {
+            selected_first = root_actions[0];
+            selected_second = -1;
+        } else {
+            selected_first = -1;
+            selected_second = -1;
+        }
     }
     __syncthreads();
 
-    // Ply 2: after every retained first stone, score all legal second stones.
-    // V3 keeps only the best second stone per root. V4/V5 keep SECOND_K.
+    if (selected_first >= 0) {
+        if (tid == 0) {
+            actions[board_id] = static_cast<int64_t>(selected_first);
+            pending_second[board_id] = static_cast<int16_t>(-1);
+        }
+        return;
+    }
+
+    // 2) Generate up to 32 unique final own-pair states: TOP8 first x TOP4 second.
     #pragma unroll
     for (int r = 0; r < ROOT_K; ++r) {
         const int first = root_actions[r];
@@ -396,183 +727,257 @@ __global__ void tactical_search_kernel(
             __syncthreads();
 
             if (tid == 0) {
-                if constexpr (DEPTH3) {
-                    int child_actions[SECOND_K];
-                    int child_scores[SECOND_K];
-                    select_top_k_serial<SECOND_K>(scores, child_actions, child_scores);
-                    #pragma unroll
-                    for (int k = 0; k < SECOND_K; ++k) {
-                        const int p = r * SECOND_K + k;
-                        pair_first[p] = first;
-                        pair_second[p] = child_actions[k];
-                        pair_scores[p] = child_scores[k];
+                int child_actions[SECOND_K];
+                int child_scores[SECOND_K];
+                select_top_k_serial<SECOND_K>(scores, child_actions, child_scores);
+
+                #pragma unroll
+                for (int k = 0; k < SECOND_K; ++k) {
+                    const int second = child_actions[k];
+                    if (second < 0) continue;
+
+                    const int lo = first < second ? first : second;
+                    const int hi = first < second ? second : first;
+                    const int64_t order =
+                        static_cast<int64_t>(root_scores[r]) +
+                        static_cast<int64_t>(child_scores[k]);
+
+                    int duplicate = -1;
+                    for (int p = 0; p < pair_count; ++p) {
+                        const int plo =
+                            pair_first[p] < pair_second[p] ? pair_first[p] : pair_second[p];
+                        const int phi =
+                            pair_first[p] < pair_second[p] ? pair_second[p] : pair_first[p];
+                        if (plo == lo && phi == hi) {
+                            duplicate = p;
+                            break;
+                        }
                     }
-                } else {
-                    int child_actions[1];
-                    int child_scores[1];
-                    select_top_k_serial<1>(scores, child_actions, child_scores);
-                    pair_first[r] = first;
-                    pair_second[r] = child_actions[0];
-                    pair_scores[r] = child_scores[0];
+
+                    if (duplicate >= 0) {
+                        if (order > pair_order[duplicate]) {
+                            pair_first[duplicate] = first;
+                            pair_second[duplicate] = second;
+                            pair_order[duplicate] = order;
+                        }
+                    } else if (pair_count < MAX_PAIRS) {
+                        const int p = pair_count++;
+                        pair_first[p] = first;
+                        pair_second[p] = second;
+                        pair_order[p] = order;
+                        pair_state[p] = INVALID_SCORE;
+                    }
                 }
             }
             __syncthreads();
 
             if (tid == 0) board[first] = 0;
             __syncthreads();
-        } else if (tid == 0) {
-            if constexpr (DEPTH3) {
-                #pragma unroll
-                for (int k = 0; k < SECOND_K; ++k) {
-                    const int p = r * SECOND_K + k;
-                    pair_first[p] = -1;
-                    pair_second[p] = -1;
-                    pair_scores[p] = INVALID_SCORE;
-                }
-            } else {
-                pair_first[r] = -1;
-                pair_second[r] = -1;
-                pair_scores[r] = INVALID_SCORE;
-            }
+        }
+    }
+
+    // 3) Evaluate the actual board after both own stones. A+B and B+A now have
+    // the same state value; V2 action urgency is no longer abused as leaf value.
+    for (int p = 0; p < pair_count; ++p) {
+        const int first = pair_first[p];
+        const int second = pair_second[p];
+        if (tid == 0) {
+            board[first] = player;
+            board[second] = player;
+        }
+        __syncthreads();
+
+        const int value = evaluate_state_parallel(
+            board,
+            player,
+            static_cast<int8_t>(-player),
+            reduce,
+            my_ta,
+            my_tb,
+            opp_ta,
+            opp_tb,
+            &my_threat_count,
+            &opp_threat_count,
+            &my_overflow,
+            &opp_overflow,
+            &my_win,
+            &opp_win,
+            &eval_result);
+
+        if (tid == 0) pair_state[p] = value;
+        __syncthreads();
+
+        if (tid == 0) {
+            board[first] = 0;
+            board[second] = 0;
         }
         __syncthreads();
     }
 
-    if constexpr (!DEPTH3) {
-        if (tid == 0) {
-            int best = -1;
-            int best_second_score = INVALID_SCORE;
-            int best_root_score = INVALID_SCORE;
+    if (tid == 0) {
+        #pragma unroll
+        for (int i = 0; i < OWN_KEEP; ++i) keep_idx[i] = -1;
 
-            // An immediate win on the first stone must never be discarded by
-            // the pair heuristic. The game will end before cached stone #2.
-            if (root_actions[0] >= 0 && root_scores[0] >= WIN_SCORE) {
-                best = 0;
-            } else {
-                #pragma unroll
-                for (int r = 0; r < ROOT_K; ++r) {
-                    if (pair_first[r] < 0) continue;
-                    const int ps = pair_scores[r];
-                    const int rs = root_scores[r];
-                    if (best < 0 || ps > best_second_score ||
-                        (ps == best_second_score && rs > best_root_score) ||
-                        (ps == best_second_score && rs == best_root_score &&
-                         pair_first[r] < pair_first[best])) {
-                        best = r;
-                        best_second_score = ps;
-                        best_root_score = rs;
-                    }
+        for (int p = 0; p < pair_count; ++p) {
+            for (int pos = 0; pos < OWN_KEEP; ++pos) {
+                const int cur = keep_idx[pos];
+                const bool take =
+                    cur < 0 ||
+                    pair_better(
+                        pair_state[p], pair_order[p], pair_first[p], pair_second[p],
+                        pair_state[cur], pair_order[cur], pair_first[cur], pair_second[cur]);
+                if (take) {
+                    for (int s = OWN_KEEP - 1; s > pos; --s)
+                        keep_idx[s] = keep_idx[s - 1];
+                    keep_idx[pos] = p;
+                    break;
                 }
             }
+        }
 
-            if (best < 0) {
-                selected_first = root_actions[0];
-                selected_second = -1;
-            } else {
-                selected_first = pair_first[best];
-                selected_second = pair_second[best];
-            }
+        if (keep_idx[0] >= 0 && pair_state[keep_idx[0]] >= STATE_FORCED) {
+            const int p = keep_idx[0];
+            selected_first = pair_first[p];
+            selected_second = pair_second[p];
+        } else {
+            selected_first = -1;
+            selected_second = -1;
+        }
+    }
+    __syncthreads();
+
+    // Exact >=3 threat pressure is already a forced win unless the opponent can
+    // win immediately; evaluate_state checks that first, so no reply tree needed.
+    if (selected_first >= 0) {
+        if (tid == 0) {
             actions[board_id] = static_cast<int64_t>(selected_first);
             pending_second[board_id] = static_cast<int16_t>(selected_second);
         }
         return;
     }
 
-    constexpr int PAIRS = ROOT_K * SECOND_K;
+    // 4) Full opponent-turn minimax only for the four best own pairs.
+    int best_pair_value = INVALID_SCORE;
+    int64_t best_pair_order = static_cast<int64_t>(LLONG_MIN);
+    int best_pair_first = -1;
+    int best_pair_second = -1;
 
-    // Ply 3: the opponent gets its first stone. For every candidate pair,
-    // measure the opponent's strongest V2 reply. Minimax then prefers the pair
-    // whose best opponent reply is weakest.
     #pragma unroll
-    for (int p = 0; p < PAIRS; ++p) {
+    for (int q = 0; q < OWN_KEEP; ++q) {
+        const int p = keep_idx[q];
+        if (p < 0) continue;
+
         const int first = pair_first[p];
         const int second = pair_second[p];
-        if (first >= 0 && second >= 0) {
+
+        if (tid == 0) {
+            board[first] = player;
+            board[second] = player;
+        }
+        __syncthreads();
+
+        score_all(board, static_cast<int8_t>(-player), 2, scores);
+        __syncthreads();
+
+        if (tid == 0) {
+            select_top_k_serial<OPP_ROOT_K>(
+                scores, opp_root_actions, opp_root_scores);
+            reply_worst = STATE_WIN;
+            reply_seen = 0;
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int r = 0; r < OPP_ROOT_K; ++r) {
+            const int ofirst = opp_root_actions[r];
+            if (ofirst < 0) continue;
+
+            if (opp_root_scores[r] >= WIN_SCORE) {
+                if (tid == 0) {
+                    reply_worst = -STATE_WIN;
+                    reply_seen = 1;
+                }
+                __syncthreads();
+                break;
+            }
+
+            if (tid == 0) board[ofirst] = static_cast<int8_t>(-player);
+            __syncthreads();
+
+            score_all(board, static_cast<int8_t>(-player), 1, scores);
+            __syncthreads();
+
             if (tid == 0) {
-                board[first] = player;
-                board[second] = player;
+                select_top_k_serial<OPP_SECOND_K>(
+                    scores, opp_second_actions, opp_second_scores);
             }
             __syncthreads();
 
-            score_all(board, static_cast<int8_t>(-player), 2, scores);
-            __syncthreads();
+            #pragma unroll
+            for (int k = 0; k < OPP_SECOND_K; ++k) {
+                const int osecond = opp_second_actions[k];
+                if (osecond < 0) continue;
 
-            if (tid == 0) {
-                int reply_action[1];
-                int reply_score[1];
-                select_top_k_serial<1>(scores, reply_action, reply_score);
-                reply_scores[p] = reply_score[0];
-            }
-            __syncthreads();
+                if (tid == 0) board[osecond] = static_cast<int8_t>(-player);
+                __syncthreads();
 
-            if (tid == 0) {
-                board[first] = 0;
-                board[second] = 0;
+                const int leaf = evaluate_state_parallel(
+                    board,
+                    player,
+                    player,
+                    reduce,
+                    my_ta,
+                    my_tb,
+                    opp_ta,
+                    opp_tb,
+                    &my_threat_count,
+                    &opp_threat_count,
+                    &my_overflow,
+                    &opp_overflow,
+                    &my_win,
+                    &opp_win,
+                    &eval_result);
+
+                if (tid == 0) {
+                    if (!reply_seen || leaf < reply_worst) reply_worst = leaf;
+                    reply_seen = 1;
+                    board[osecond] = 0;
+                }
+                __syncthreads();
             }
+
+            if (tid == 0) board[ofirst] = 0;
             __syncthreads();
-        } else if (tid == 0) {
-            reply_scores[p] = INVALID_SCORE;
+        }
+
+        if (tid == 0 && !reply_seen) reply_worst = pair_state[p];
+        __syncthreads();
+
+        if (tid == 0) {
+            board[first] = 0;
+            board[second] = 0;
+
+            if (best_pair_first < 0 ||
+                pair_better(
+                    reply_worst, pair_order[p], first, second,
+                    best_pair_value, best_pair_order,
+                    best_pair_first, best_pair_second)) {
+                best_pair_value = reply_worst;
+                best_pair_order = pair_order[p];
+                best_pair_first = first;
+                best_pair_second = second;
+            }
         }
         __syncthreads();
     }
 
     if (tid == 0) {
-        int best = -1;
-
-        // Same first-ply terminal guard as V3.
-        if (root_actions[0] >= 0 && root_scores[0] >= WIN_SCORE) {
-            for (int p = 0; p < PAIRS; ++p) {
-                if (pair_first[p] == root_actions[0]) {
-                    best = p;
-                    break;
-                }
-            }
-        }
-
-        // A pair that wins on our second stone dominates any minimax reply.
-        if (best < 0) {
-            for (int p = 0; p < PAIRS; ++p) {
-                if (pair_first[p] < 0 || pair_second[p] < 0) continue;
-                if (pair_scores[p] < WIN_SCORE) continue;
-                if (best < 0 ||
-                    pair_scores[p] > pair_scores[best] ||
-                    (pair_scores[p] == pair_scores[best] &&
-                     pair_first[p] < pair_first[best]) ||
-                    (pair_scores[p] == pair_scores[best] &&
-                     pair_first[p] == pair_first[best] &&
-                     pair_second[p] < pair_second[best])) {
-                    best = p;
-                }
-            }
-        }
-
-        // Otherwise minimize the opponent's best first reply. Pair score is a
-        // secondary tie-break so equally safe branches keep our stronger move.
-        if (best < 0) {
-            for (int p = 0; p < PAIRS; ++p) {
-                if (pair_first[p] < 0 || pair_second[p] < 0) continue;
-                if (best < 0 ||
-                    reply_scores[p] < reply_scores[best] ||
-                    (reply_scores[p] == reply_scores[best] &&
-                     pair_scores[p] > pair_scores[best]) ||
-                    (reply_scores[p] == reply_scores[best] &&
-                     pair_scores[p] == pair_scores[best] &&
-                     pair_first[p] < pair_first[best]) ||
-                    (reply_scores[p] == reply_scores[best] &&
-                     pair_scores[p] == pair_scores[best] &&
-                     pair_first[p] == pair_first[best] &&
-                     pair_second[p] < pair_second[best])) {
-                    best = p;
-                }
-            }
-        }
-
-        if (best < 0) {
+        if (best_pair_first < 0) {
             selected_first = root_actions[0];
             selected_second = -1;
         } else {
-            selected_first = pair_first[best];
-            selected_second = pair_second[best];
+            selected_first = best_pair_first;
+            selected_second = best_pair_second;
         }
         actions[board_id] = static_cast<int64_t>(selected_first);
         pending_second[board_id] = static_cast<int16_t>(selected_second);
@@ -590,35 +995,12 @@ extern "C" cudaError_t launch_tactical_bot_v3_cuda(
     int batch,
     cudaStream_t stream) {
     if (batch <= 0) return cudaSuccess;
-    tactical_search_kernel<8, 1, false><<<batch, THREADS, 0, stream>>>(
-        boards, current_player, stones_left, pending_second, actions, batch);
-    return cudaGetLastError();
-}
-
-extern "C" cudaError_t launch_tactical_bot_v4_8x2_cuda(
-    const int8_t* boards,
-    const int8_t* current_player,
-    const int8_t* stones_left,
-    int16_t* pending_second,
-    int64_t* actions,
-    int batch,
-    cudaStream_t stream) {
-    if (batch <= 0) return cudaSuccess;
-    tactical_search_kernel<8, 2, true><<<batch, THREADS, 0, stream>>>(
-        boards, current_player, stones_left, pending_second, actions, batch);
-    return cudaGetLastError();
-}
-
-extern "C" cudaError_t launch_tactical_bot_v5_8x4_cuda(
-    const int8_t* boards,
-    const int8_t* current_player,
-    const int8_t* stones_left,
-    int16_t* pending_second,
-    int64_t* actions,
-    int batch,
-    cudaStream_t stream) {
-    if (batch <= 0) return cudaSuccess;
-    tactical_search_kernel<8, 4, true><<<batch, THREADS, 0, stream>>>(
-        boards, current_player, stones_left, pending_second, actions, batch);
+    tactical_search_v3_kernel<<<batch, THREADS, 0, stream>>>(
+        boards,
+        current_player,
+        stones_left,
+        pending_second,
+        actions,
+        batch);
     return cudaGetLastError();
 }

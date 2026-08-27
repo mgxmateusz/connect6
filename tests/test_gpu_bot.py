@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch.utils.cpp_extension import CUDA_HOME
 
-from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2
+from connect6.bots.gpu_bot import GPUTacticalBot, GPUTacticalBotV2, GPUTacticalBotV3
 
 
 pytestmark = pytest.mark.skipif(
@@ -74,3 +74,35 @@ def test_gpu_bots_first_stone_sets_up_two_stone_win(bot_cls):
         if found:
             break
     assert found
+
+
+def test_v3_plans_and_caches_second_stone_on_gpu():
+    bot = GPUTacticalBotV3("cuda")
+    board = torch.zeros((1, 19, 19), dtype=torch.int8, device="cuda")
+    board[0, 8, 6:10] = 1
+    player = torch.ones(1, dtype=torch.int8, device="cuda")
+    left_two = torch.full((1,), 2, dtype=torch.int8, device="cuda")
+    left_one = torch.ones(1, dtype=torch.int8, device="cuda")
+
+    bot.reset()
+    first = int(bot.actions(board, player, left_two)[0].item())
+    assert 0 <= first < 361
+    assert int(board.view(-1)[first].item()) == 0
+    board.view(-1)[first] = 1
+
+    second = int(bot.actions(board, player, left_one)[0].item())
+    assert 0 <= second < 361
+    assert second != first
+    assert int(board.view(-1)[second].item()) == 0
+
+
+def test_v3_takes_immediate_win_on_first_stone():
+    bot = GPUTacticalBotV3("cuda")
+    board = torch.zeros((1, 19, 19), dtype=torch.int8, device="cuda")
+    board[0, 9, 4:9] = 1
+    player = torch.ones(1, dtype=torch.int8, device="cuda")
+    left_two = torch.full((1,), 2, dtype=torch.int8, device="cuda")
+
+    bot.reset()
+    action = int(bot.actions(board, player, left_two)[0].item())
+    assert action in {9 * 19 + 3, 9 * 19 + 9}
