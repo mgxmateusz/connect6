@@ -29,7 +29,7 @@ extern "C" cudaError_t launch_tactical_bot_v3_cuda(
     int batch,
     cudaStream_t stream);
 
-extern "C" cudaError_t launch_tactical_bot_v4_top32_cuda(
+extern "C" cudaError_t launch_tactical_bot_v4_top16_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -221,8 +221,8 @@ torch::Tensor tactical_bot_v4_actions(
         current_player,
         stones_left,
         pending_second,
-        launch_tactical_bot_v4_top32_cuda,
-        "GPU Tactical Bot V4 Top32 Pair-State");
+        launch_tactical_bot_v4_top16_cuda,
+        "GPU Tactical Bot V4 Top16 Pair-State");
 }
 
 
@@ -242,5 +242,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "tactical_bot_v4_actions",
         &tactical_bot_v4_actions,
-        "Connect6 GPU Tactical Bot V4 top32 pair-state actions");
+        "Connect6 GPU Tactical Bot V4 top16 pair-state actions");
 }
