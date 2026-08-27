@@ -8,6 +8,7 @@ from .cuda_native.bot_loader import load_native_bot_extension
 GPU_TACTICAL_BOT = "GPU Tactical Bot V1"
 GPU_TACTICAL_BOT_V2 = "GPU Tactical Bot V2"
 GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Pair-State"
+GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top32 Pair-State"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -138,24 +139,32 @@ class GPUTacticalBotV3(_SearchGPUTacticalBot):
     label = GPU_TACTICAL_BOT_V3
 
 
-class _RemovedSearchBot(GPUTacticalBotV3):
-    """Import-compatibility shell for deleted experimental versions."""
+class GPUTacticalBotV4(_SearchGPUTacticalBot):
+    """V4: TOP32 current-position cells, exhaustive two-stone pair selection.
 
-    removed_name = "old search bot"
+    One V2 pass ranks the 32 most promising legal cells. V4 then evaluates all
+    496 unordered pairs with the same 924-road pair-state evaluator used by V3.
+    It deliberately performs no opponent-response search; this isolates whether
+    wider candidate recall beats V3's narrower candidate beam plus minimax.
+    """
+
+    entrypoint = "tactical_bot_v4_actions"
+    label = GPU_TACTICAL_BOT_V4
+
+
+# Compatibility name used by older arena modules. It now points at the current
+# V4 experiment rather than the deleted D3[8,2] implementation.
+GPUTacticalBotV4B8x2 = GPUTacticalBotV4
+
+
+class GPUTacticalBotV5B8x4(GPUTacticalBotV3):
+    """Import-compatibility shell for the removed old V5 experiment."""
 
     def __init__(self, *args, **kwargs):
         raise RuntimeError(
-            f"{self.removed_name} was removed. Use GPUTacticalBotV3 "
-            "(pair-state/full-turn GPU search)."
+            "GPU Tactical Bot V5 D3 B8x4 was removed. Use GPUTacticalBotV3 "
+            "or GPUTacticalBotV4."
         )
-
-
-class GPUTacticalBotV4B8x2(_RemovedSearchBot):
-    removed_name = "GPU Tactical Bot V4 D3 B8x2"
-
-
-class GPUTacticalBotV5B8x4(_RemovedSearchBot):
-    removed_name = "GPU Tactical Bot V5 D3 B8x4"
 
 
 def create_gpu_tactical_bot(
@@ -164,13 +173,14 @@ def create_gpu_tactical_bot(
     *,
     verbose_build: bool = False,
 ) -> _BaseGPUTacticalBot:
-    # V3 keeps per-board pending-second state and is deliberately not inserted
-    # into the native training actor mix until rollout reset/state plumbing is
-    # added for it.
+    # V3/V4 keep per-board pending-second state and are deliberately not inserted
+    # into the native training actor mix until rollout reset/state plumbing exists.
     if label == GPU_TACTICAL_BOT:
         return GPUTacticalBot(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_V2:
         return GPUTacticalBotV2(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_V3:
         return GPUTacticalBotV3(device, verbose_build=verbose_build)
+    if label == GPU_TACTICAL_BOT_V4:
+        return GPUTacticalBotV4(device, verbose_build=verbose_build)
     raise ValueError(f"Unknown GPU tactical bot: {label}")
