@@ -8,7 +8,7 @@ from .cuda_native.bot_loader import load_native_bot_extension
 GPU_TACTICAL_BOT = "GPU Tactical Bot V1"
 GPU_TACTICAL_BOT_V2 = "GPU Tactical Bot V2"
 GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Pair-State"
-GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top32 Pair-State"
+GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top16 Pair-State"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -140,10 +140,10 @@ class GPUTacticalBotV3(_SearchGPUTacticalBot):
 
 
 class GPUTacticalBotV4(_SearchGPUTacticalBot):
-    """V4: TOP32 current-position cells, exhaustive two-stone pair selection.
+    """V4: TOP16 current-position cells, exhaustive two-stone pair selection.
 
-    One V2 pass ranks the 32 most promising legal cells. V4 then evaluates all
-    496 unordered pairs with the same 924-road pair-state evaluator used by V3.
+    One V2 pass ranks the 16 most promising legal cells. V4 then evaluates all
+    120 unordered pairs with the same 924-road pair-state evaluator used by V3.
     It deliberately performs no opponent-response search; this isolates whether
     wider candidate recall beats V3's narrower candidate beam plus minimax.
     """
