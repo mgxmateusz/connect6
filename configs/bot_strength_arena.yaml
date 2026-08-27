@@ -7,6 +7,8 @@ bot_strength_arena:
   # Small = TOP12 -> 66 own pairs, no reply. Pure width-control experiment.
   # V4 = TOP12 -> 66 own pairs -> TOP4 own pairs -> opponent V2 TOP6 cells
   #      -> all C(6,2)=15 full two-stone opponent reply pairs.
+  # Full Pair Brute Force is benchmark-only and is injected by
+  # tools/run_bot_strength_arena.py only into the V3-vs-FULL reference match.
   bots: ["v1", "v2", "v3", "small", "v4"]
 
   models_per_batch: 512
@@ -25,4 +27,5 @@ bot_strength_arena:
       4: 3
     vcf: false
     timeout_seconds: 60.0
-    max_restarts: 20
+    # <= 0 = unlimited retries, but only for known recoverable crash/timeout errors.
+    max_restarts: 0
