@@ -126,7 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="GPU decision benchmark on legal non-terminal Connect6 positions")
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
-    parser.add_argument("--batch-sizes", default="1,32,128,256,512,1024,2048")
+    parser.add_argument("--batch-sizes", default="1,32,128,256,512,1024")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=2000)
     parser.add_argument(
