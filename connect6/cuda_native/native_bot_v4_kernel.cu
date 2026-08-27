@@ -5,7 +5,7 @@ namespace {
 using namespace v4_detail;
 
 constexpr int CANDIDATE_K = 8;
-constexpr int KEEP_K = 4;
+constexpr int KEEP_K = 3;
 
 __global__ void tactical_search_v4_top8_reply1_kernel(
     const int8_t* __restrict__ boards,
@@ -113,7 +113,7 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
     }
 
     // 2) Evaluate every unordered pair from TOP8: C(8,2)=28 states.
-    // Keep only the four best complete own-pair states for the reply stage.
+    // Keep only the three best complete own-pair states for the reply stage.
     #pragma unroll 1
     for (int i = 0; i < CANDIDATE_K; ++i) {
         const int first = candidate_actions[i];
@@ -195,7 +195,7 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
         return;
     }
 
-    // 3) For each of the TOP4 own pairs, try every legal ONE-STONE opponent
+    // 3) For each of the TOP3 own pairs, try every legal ONE-STONE opponent
     // reply. The opponent chooses the leaf that is worst for us. This is an
     // intentionally shallow one-stone reply experiment, not a full Connect6
     // opponent turn.
