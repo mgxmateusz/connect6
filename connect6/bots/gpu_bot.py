@@ -11,6 +11,8 @@ GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Top16 Pair-State"
 GPU_TACTICAL_BOT_SMALL = "GPU Tactical Bot Small Top12 Pair-State"
 GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top12 ReplyPair6"
 GPU_TACTICAL_BOT_FULL_PAIR = "GPU Tactical Bot Full Pair Brute Force"
+GPU_TACTICAL_BOT_PAIRFIRST = "GPU Tactical Bot PairFirst AllPairs P128"
+GPU_TACTICAL_BOT_LIVEROAD = "GPU Tactical Bot LiveRoad Brute Force"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -118,7 +120,7 @@ class GPUTacticalBotV3(_SearchGPUTacticalBot):
 
 
 class GPUTacticalBotSmall(_SearchGPUTacticalBot):
-    """Control bot: exactly V3-style search, but TOP12 -> C(12,2)=66 pairs."""
+    """Historical control: V3-style search with TOP12 -> C(12,2)=66 pairs."""
 
     entrypoint = "tactical_bot_small_actions"
     label = GPU_TACTICAL_BOT_SMALL
@@ -137,15 +139,35 @@ class GPUTacticalBotV4(_SearchGPUTacticalBot):
 
 
 class GPUTacticalBotFullPair(_SearchGPUTacticalBot):
-    """Benchmark-only exhaustive reference: every legal two-stone pair.
-
-    It intentionally uses the same pair-state evaluator as V3 and differs only
-    in candidate width: V3 evaluates TOP16/C(16,2), this bot evaluates C(E,2)
-    over all empty cells. It is far too expensive for normal play/training.
-    """
+    """Exhaustive reference: every legal unordered two-stone pair C(E,2)."""
 
     entrypoint = "tactical_bot_full_pair_actions"
     label = GPU_TACTICAL_BOT_FULL_PAIR
+
+
+class GPUTacticalBotPairFirst(_SearchGPUTacticalBot):
+    """Pair-native prefilter: cheap-score every legal pair, exact-evaluate TOP128.
+
+    Unlike V3/V4 candidate generation, this never constructs pairs from a TOP-k
+    list of individual cells. The cheap stage sees A+B simultaneously and scans
+    only six-cell roads touched by A or B, then the same 924-road evaluator used
+    by Full decides among the retained pair candidates.
+    """
+
+    entrypoint = "tactical_bot_pairfirst_actions"
+    label = GPU_TACTICAL_BOT_PAIRFIRST
+
+
+class GPUTacticalBotLiveRoad(_SearchGPUTacticalBot):
+    """Exact brute force over an adaptive pool of structurally live-road cells.
+
+    Every empty cell from every clean own/opponent six-road containing at least
+    two stones enters the pool. If the pool is smaller than 16, it is filled to
+    the V3 width with V2 seeds; above that floor there is no TOP pair pruning.
+    """
+
+    entrypoint = "tactical_bot_liveroad_actions"
+    label = GPU_TACTICAL_BOT_LIVEROAD
 
 
 # Compatibility name used by older arena modules.
@@ -156,7 +178,7 @@ class GPUTacticalBotV5B8x4(GPUTacticalBotV3):
     def __init__(self, *args, **kwargs):
         raise RuntimeError(
             "GPU Tactical Bot V5 D3 B8x4 was removed. Use GPUTacticalBotV3, "
-            "GPUTacticalBotSmall or GPUTacticalBotV4."
+            "GPUTacticalBotV4, GPUTacticalBotPairFirst or GPUTacticalBotLiveRoad."
         )
 
 
@@ -178,4 +200,8 @@ def create_gpu_tactical_bot(
         return GPUTacticalBotV4(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_FULL_PAIR:
         return GPUTacticalBotFullPair(device, verbose_build=verbose_build)
+    if label == GPU_TACTICAL_BOT_PAIRFIRST:
+        return GPUTacticalBotPairFirst(device, verbose_build=verbose_build)
+    if label == GPU_TACTICAL_BOT_LIVEROAD:
+        return GPUTacticalBotLiveRoad(device, verbose_build=verbose_build)
     raise ValueError(f"Unknown GPU tactical bot: {label}")
