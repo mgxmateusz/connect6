@@ -7,8 +7,8 @@ from .cuda_native.bot_loader import load_native_bot_extension
 
 GPU_TACTICAL_BOT = "GPU Tactical Bot V1"
 GPU_TACTICAL_BOT_V2 = "GPU Tactical Bot V2"
-GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Pair-State"
-GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top16 Pair-State"
+GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Top16 Pair-State"
+GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top8 Reply1"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -127,12 +127,11 @@ class _SearchGPUTacticalBot(_BaseGPUTacticalBot):
 
 
 class GPUTacticalBotV3(_SearchGPUTacticalBot):
-    """V3: pair-state search with full-turn opponent replies.
+    """V3: TOP16 current-position cells and exhaustive pair-state selection.
 
-    V2 is used only for move ordering. Up to 32 unique own pairs are evaluated
-    by a separate 924-road board evaluator with exact 0/1/2/3+ threat pressure.
-    Only the best four pairs receive a full opponent 4x2 pair search, keeping
-    worst-case V2-score work below the removed V5 implementation.
+    One V2 pass ranks the 16 strongest legal cells. All C(16,2)=120 unordered
+    pairs are evaluated with the 924-road state evaluator. No opponent reply is
+    searched. This is the former V4 Top16 algorithm, promoted to V3.
     """
 
     entrypoint = "tactical_bot_v3_actions"
@@ -140,20 +139,19 @@ class GPUTacticalBotV3(_SearchGPUTacticalBot):
 
 
 class GPUTacticalBotV4(_SearchGPUTacticalBot):
-    """V4: TOP16 current-position cells, exhaustive two-stone pair selection.
+    """V4: TOP8 pair search plus exhaustive one-stone opponent reply.
 
-    One V2 pass ranks the 16 most promising legal cells. V4 then evaluates all
-    120 unordered pairs with the same 924-road pair-state evaluator used by V3.
-    It deliberately performs no opponent-response search; this isolates whether
-    wider candidate recall beats V3's narrower candidate beam plus minimax.
+    One V2 pass keeps the 8 strongest current-position cells. All 28 unordered
+    own pairs are state-evaluated; only the best four continue. For each of those
+    four pairs every legal single opponent stone is tested, and V4 chooses the
+    own pair with the best worst-case resulting board state.
     """
 
     entrypoint = "tactical_bot_v4_actions"
     label = GPU_TACTICAL_BOT_V4
 
 
-# Compatibility name used by older arena modules. It now points at the current
-# V4 experiment rather than the deleted D3[8,2] implementation.
+# Compatibility name used by older arena modules.
 GPUTacticalBotV4B8x2 = GPUTacticalBotV4
 
 
