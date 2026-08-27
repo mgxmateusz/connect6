@@ -4,10 +4,11 @@ namespace {
 
 using namespace v4_detail;
 
-constexpr int CANDIDATE_K = 8;
-constexpr int KEEP_K = 3;
+constexpr int CANDIDATE_K = 12;
+constexpr int KEEP_K = 4;
+constexpr int REPLY_K = 4;
 
-__global__ void tactical_search_v4_top8_reply1_kernel(
+__global__ void tactical_search_v4_top12_reply4_kernel(
     const int8_t* __restrict__ boards,
     const int8_t* __restrict__ current_player,
     const int8_t* __restrict__ stones_left,
@@ -31,6 +32,9 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
     __shared__ int keep_second[KEEP_K];
     __shared__ int keep_value[KEEP_K];
     __shared__ int64_t keep_order[KEEP_K];
+
+    __shared__ int reply_actions[REPLY_K];
+    __shared__ int reply_scores[REPLY_K];
 
     __shared__ int reduce[THREADS];
     __shared__ int16_t my_ta[MAX_THREATS];
@@ -80,7 +84,7 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
         return;
     }
 
-    // 1) Rank the current board once and keep the eight strongest cells.
+    // 1) Rank our current board once and keep the twelve strongest cells.
     score_all(board, player, 2, scores);
     __syncthreads();
     if (tid == 0) {
@@ -112,8 +116,8 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
         return;
     }
 
-    // 2) Evaluate every unordered pair from TOP8: C(8,2)=28 states.
-    // Keep only the three best complete own-pair states for the reply stage.
+    // 2) Evaluate every unordered pair from TOP12: C(12,2)=66 states.
+    // Keep the four best complete own-pair states for the reply stage.
     #pragma unroll 1
     for (int i = 0; i < CANDIDATE_K; ++i) {
         const int first = candidate_actions[i];
@@ -195,10 +199,9 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
         return;
     }
 
-    // 3) For each of the TOP3 own pairs, try every legal ONE-STONE opponent
-    // reply. The opponent chooses the leaf that is worst for us. This is an
-    // intentionally shallow one-stone reply experiment, not a full Connect6
-    // opponent turn.
+    // 3) For each of our TOP4 pairs, use the SAME cheap V2 score_all from the
+    // opponent's perspective to filter all legal cells down to its TOP4 first
+    // stones. Only those four replies receive the expensive full state eval.
     int best_pair_value = INVALID_SCORE;
     int64_t best_pair_order = static_cast<int64_t>(LLONG_MIN);
     int best_pair_first = -1;
@@ -218,8 +221,20 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
         }
         __syncthreads();
 
-        for (int reply = 0; reply < CELLS; ++reply) {
-            if (board[reply] != 0) continue;
+        // The opponent is at the start of its normal two-stone turn. We only
+        // inspect its first stone in this shallow experiment, but rank that stone
+        // with the normal V2 stones_left=2 semantics.
+        score_all(board, static_cast<int8_t>(-player), 2, scores);
+        __syncthreads();
+        if (tid == 0) {
+            select_top_k_serial<REPLY_K>(scores, reply_actions, reply_scores);
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int r = 0; r < REPLY_K; ++r) {
+            const int reply = reply_actions[r];
+            if (reply < 0 || board[reply] != 0) continue;
 
             if (tid == 0) board[reply] = static_cast<int8_t>(-player);
             __syncthreads();
@@ -293,7 +308,7 @@ __global__ void tactical_search_v4_top8_reply1_kernel(
 
 }  // namespace
 
-extern "C" cudaError_t launch_tactical_bot_v4_top8_reply1_cuda(
+extern "C" cudaError_t launch_tactical_bot_v4_top12_reply4_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -302,7 +317,7 @@ extern "C" cudaError_t launch_tactical_bot_v4_top8_reply1_cuda(
     int batch,
     cudaStream_t stream) {
     if (batch <= 0) return cudaSuccess;
-    tactical_search_v4_top8_reply1_kernel<<<batch, v4_detail::THREADS, 0, stream>>>(
+    tactical_search_v4_top12_reply4_kernel<<<batch, v4_detail::THREADS, 0, stream>>>(
         boards,
         current_player,
         stones_left,
