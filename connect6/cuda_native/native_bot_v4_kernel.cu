@@ -4,10 +4,10 @@ namespace {
 
 using namespace v4_detail;
 
-constexpr int CANDIDATE_K = 32;
+constexpr int CANDIDATE_K = 16;
 constexpr int PAIR_COUNT = (CANDIDATE_K * (CANDIDATE_K - 1)) / 2;
 
-__global__ void tactical_search_v4_top32_kernel(
+__global__ void tactical_search_v4_top16_kernel(
     const int8_t* __restrict__ boards,
     const int8_t* __restrict__ current_player,
     const int8_t* __restrict__ stones_left,
@@ -74,7 +74,7 @@ __global__ void tactical_search_v4_top32_kernel(
         return;
     }
 
-    // One ordering pass only: retain the 32 best current-position cells.
+    // One ordering pass only: retain the 16 best current-position cells.
     score_all(board, player, 2, scores);
     __syncthreads();
     if (tid == 0) {
@@ -100,7 +100,7 @@ __global__ void tactical_search_v4_top32_kernel(
         return;
     }
 
-    // Exhaustively score all C(32,2)=496 unordered pairs. No opponent reply is
+    // Exhaustively score all C(16,2)=120 unordered pairs. No opponent reply is
     // searched in V4: this experiment isolates candidate recall + pair-state
     // quality from V3's narrower beam/full-turn minimax.
     int best_value = INVALID_SCORE;
@@ -187,7 +187,7 @@ __global__ void tactical_search_v4_top32_kernel(
 
 }  // namespace
 
-extern "C" cudaError_t launch_tactical_bot_v4_top32_cuda(
+extern "C" cudaError_t launch_tactical_bot_v4_top16_cuda(
     const int8_t* boards,
     const int8_t* current_player,
     const int8_t* stones_left,
@@ -196,7 +196,7 @@ extern "C" cudaError_t launch_tactical_bot_v4_top32_cuda(
     int batch,
     cudaStream_t stream) {
     if (batch <= 0) return cudaSuccess;
-    tactical_search_v4_top32_kernel<<<batch, v4_detail::THREADS, 0, stream>>>(
+    tactical_search_v4_top16_kernel<<<batch, v4_detail::THREADS, 0, stream>>>(
         boards,
         current_player,
         stones_left,
