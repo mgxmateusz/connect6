@@ -38,16 +38,17 @@ def load_native_bot_extension(*, verbose: bool = False):
 
     root = Path(__file__).resolve().parent
     sources = [
-        str(root / "native_bot.cpp"),
+        str(root / "native_bot_v14.cpp"),
         str(root / "native_bot_kernel.cu"),
         str(root / "native_bot_v3_kernel.cu"),
-        str(root / "native_bot_v4_kernel.cu"),
+        str(root / "native_bot_small_kernel.cu"),
+        str(root / "native_bot_v4_reply6_kernel.cu"),
     ]
 
-    # v13 keeps V3 TOP16/120 no-reply. V4 uses TOP12/66 own pairs, keeps
-    # TOP4 own pairs, then V2-ranks the opponent to TOP4 cells and evaluates
-    # all C(4,2)=6 full two-stone opponent reply pairs for each own pair.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v13"
+    # v14 adds Small = V3-style TOP12/66 no-reply control bot. V4 still uses
+    # TOP12/66 own pairs and TOP4 own finalists, but opponent filtering widens
+    # to TOP6 cells => C(6,2)=15 full reply pairs per finalist.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v14"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -65,8 +66,8 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use compiles V1/V2 + V3 TOP16 + V4 TOP12/TOP4/ReplyPair4 CUDA kernels; "
-        "later runs use the cache.",
+        "[BOT BUILD] First use compiles V1/V2 + V3 TOP16 + Small TOP12 + "
+        "V4 TOP12/TOP4/ReplyPair6 CUDA kernels; later runs use the cache.",
         flush=True,
     )
 
