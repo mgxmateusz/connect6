@@ -7,6 +7,7 @@ from .cuda_native.bot_loader import load_native_bot_extension
 
 GPU_TACTICAL_BOT = "GPU Tactical Bot V1"
 GPU_TACTICAL_BOT_V2 = "GPU Tactical Bot V2"
+GPU_TACTICAL_BOT_V2_PRO = "GPU Tactical Bot V2 Pro LatentFork"
 GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Top16 Pair-State"
 GPU_TACTICAL_BOT_SMALL = "GPU Tactical Bot Small Top12 Pair-State"
 GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top12 ReplyPair6"
@@ -16,7 +17,8 @@ GPU_TACTICAL_BOT_PAIRFIRST32 = "GPU Tactical Bot PairFirst AllPairs P32"
 GPU_TACTICAL_BOT_LIVEROAD = "GPU Tactical Bot LiveRoad Brute Force"
 GPU_TACTICAL_BOT_HYBRID = "GPU Tactical Bot Hybrid LiveRoad Pair128"
 GPU_TACTICAL_BOT_HYBRID32 = "GPU Tactical Bot Hybrid LiveRoad Pair32"
-# Training/native rollout still only knows the stateless V1/V2 actors.
+# Training/native rollout still only knows the original stateless V1/V2 actors.
+# V2 Pro stays benchmark/arena/GUI-only until its scorer is validated.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
 
@@ -66,6 +68,13 @@ class GPUTacticalBot(_BaseGPUTacticalBot):
 class GPUTacticalBotV2(_BaseGPUTacticalBot):
     entrypoint = "tactical_bot_v2_actions"
     label = GPU_TACTICAL_BOT_V2
+
+
+class GPUTacticalBotV2Pro(_BaseGPUTacticalBot):
+    """V2 architecture with latent 2->3/3->4 fork-anchor road leverage."""
+
+    entrypoint = "tactical_bot_v2_pro_actions"
+    label = GPU_TACTICAL_BOT_V2_PRO
 
 
 class _SearchGPUTacticalBot(_BaseGPUTacticalBot):
@@ -206,6 +215,8 @@ def create_gpu_tactical_bot(
         return GPUTacticalBot(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_V2:
         return GPUTacticalBotV2(device, verbose_build=verbose_build)
+    if label == GPU_TACTICAL_BOT_V2_PRO:
+        return GPUTacticalBotV2Pro(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_V3:
         return GPUTacticalBotV3(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_SMALL:
