@@ -38,26 +38,24 @@ def load_native_bot_extension(*, verbose: bool = False):
 
     root = Path(__file__).resolve().parent
     sources = [
-        str(root / "native_bot_v22.cpp"),
+        str(root / "native_bot_v23.cpp"),
         str(root / "native_bot_kernel.cu"),
-        # Pro2 TU includes the original V2 Pro TU, so both V2Pro and V2Pro2
-        # launchers are compiled once without duplicate symbols.
-        str(root / "native_bot_v2_pro2_kernel.cu"),
-        str(root / "native_bot_v3_kernel.cu"),
+        str(root / "native_bot_v2_pro_kernel.cu"),
+        # Each Pro TU includes its unchanged baseline implementation, then adds
+        # the scorer-only experimental twin. This avoids duplicate symbols and
+        # keeps baseline-vs-Pro search/evaluator code in the same translation unit.
+        str(root / "native_bot_v3_pro_kernel.cu"),
         str(root / "native_bot_small_kernel.cu"),
-        str(root / "native_bot_v4_reply6_kernel.cu"),
-        str(root / "native_bot_full_pair_kernel.cu"),
-        # Includes the existing P128 PairFirst kernel and adds controlled P32.
-        str(root / "native_bot_pairfirst_variants32_kernel.cu"),
-        str(root / "native_bot_liveroad_kernel.cu"),
-        # Historical H96/H64 implementations remain in the native TU, but the
-        # active benchmark/arena/GUI expose only H128 and H32.
-        str(root / "native_bot_hybrid_liveroad_pair_variants32_kernel.cu"),
+        str(root / "native_bot_v4_pro_kernel.cu"),
+        str(root / "native_bot_full_pair_pro_kernel.cu"),
+        str(root / "native_bot_pairfirst_pro_kernel.cu"),
+        str(root / "native_bot_liveroad_pro_kernel.cu"),
+        str(root / "native_bot_hybrid_pro_kernel.cu"),
     ]
 
-    # v22 adds V2 Pro2: V2Pro's one-cell scorer plus local X+Y pair-force
-    # awareness for 2->4 / 3->5 / 4->6 structures on shared Connect6 roads.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v22"
+    # v23 removes V2Pro2 from the active extension and adds controlled V2Pro
+    # scorer/prior twins for every active search family from V3 onward.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v23"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -75,9 +73,9 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use compiles V1/V2/V2 Pro/V2 Pro2 + V3 TOP16 + Small TOP12 + "
-        "V4 ReplyPair6 + Full Pair + PairFirst P128/P32 + LiveRoad + "
-        "Hybrid H128/H32 CUDA kernels; later runs use the cache.",
+        "[BOT BUILD] First use compiles V1/V2/V2Pro + baseline/Pro V3, V4, "
+        "PairFirst P128/P32, Hybrid H128/H32, LiveRoad and Full Pair kernels; "
+        "later runs use the cache.",
         flush=True,
     )
 
