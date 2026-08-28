@@ -5,8 +5,11 @@ from torch.utils.cpp_extension import CUDA_HOME
 from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
+    GPUTacticalBotV2Pro,
     GPUTacticalBotV3,
+    GPUTacticalBotV3Pro,
     GPUTacticalBotV4,
+    GPUTacticalBotV4Pro,
 )
 
 
@@ -16,12 +19,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(params=[GPUTacticalBot, GPUTacticalBotV2], ids=["v1", "v2"])
+@pytest.fixture(
+    params=[GPUTacticalBot, GPUTacticalBotV2, GPUTacticalBotV2Pro],
+    ids=["v1", "v2", "v2pro"],
+)
 def bot_cls(request):
     return request.param
 
 
-@pytest.fixture(params=[GPUTacticalBotV3, GPUTacticalBotV4], ids=["v3", "v4"])
+@pytest.fixture(
+    params=[GPUTacticalBotV3, GPUTacticalBotV3Pro, GPUTacticalBotV4, GPUTacticalBotV4Pro],
+    ids=["v3", "v3pro", "v4", "v4pro"],
+)
 def search_bot_cls(request):
     return request.param
 
