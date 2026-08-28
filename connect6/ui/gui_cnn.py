@@ -10,15 +10,22 @@ from .gpu_bot import (
     GPU_TACTICAL_BOT,
     GPU_TACTICAL_BOT_V2,
     GPU_TACTICAL_BOT_V2_PRO,
-    GPU_TACTICAL_BOT_V2_PRO2,
     GPU_TACTICAL_BOT_V3,
+    GPU_TACTICAL_BOT_V3_PRO,
     GPU_TACTICAL_BOT_V4,
+    GPU_TACTICAL_BOT_V4_PRO,
     GPU_TACTICAL_BOT_FULL_PAIR,
+    GPU_TACTICAL_BOT_FULL_PAIR_PRO,
     GPU_TACTICAL_BOT_PAIRFIRST,
+    GPU_TACTICAL_BOT_PAIRFIRST_PRO,
     GPU_TACTICAL_BOT_PAIRFIRST32,
+    GPU_TACTICAL_BOT_PAIRFIRST32_PRO,
     GPU_TACTICAL_BOT_LIVEROAD,
+    GPU_TACTICAL_BOT_LIVEROAD_PRO,
     GPU_TACTICAL_BOT_HYBRID,
+    GPU_TACTICAL_BOT_HYBRID_PRO,
     GPU_TACTICAL_BOT_HYBRID32,
+    GPU_TACTICAL_BOT_HYBRID32_PRO,
     create_gpu_tactical_bot,
 )
 from .gui import HUMAN, Connect6GUI
@@ -30,15 +37,22 @@ GUI_TACTICAL_BOTS = (
     GPU_TACTICAL_BOT,
     GPU_TACTICAL_BOT_V2,
     GPU_TACTICAL_BOT_V2_PRO,
-    GPU_TACTICAL_BOT_V2_PRO2,
     GPU_TACTICAL_BOT_V3,
+    GPU_TACTICAL_BOT_V3_PRO,
     GPU_TACTICAL_BOT_V4,
+    GPU_TACTICAL_BOT_V4_PRO,
     GPU_TACTICAL_BOT_PAIRFIRST,
+    GPU_TACTICAL_BOT_PAIRFIRST_PRO,
     GPU_TACTICAL_BOT_PAIRFIRST32,
+    GPU_TACTICAL_BOT_PAIRFIRST32_PRO,
     GPU_TACTICAL_BOT_HYBRID,
+    GPU_TACTICAL_BOT_HYBRID_PRO,
     GPU_TACTICAL_BOT_HYBRID32,
+    GPU_TACTICAL_BOT_HYBRID32_PRO,
     GPU_TACTICAL_BOT_LIVEROAD,
+    GPU_TACTICAL_BOT_LIVEROAD_PRO,
     GPU_TACTICAL_BOT_FULL_PAIR,
+    GPU_TACTICAL_BOT_FULL_PAIR_PRO,
 )
 
 
@@ -96,15 +110,11 @@ class Connect6CNNGUI(Connect6GUI):
         def worker() -> None:
             try:
                 first_label = GUI_TACTICAL_BOTS[0]
-                first = create_gpu_tactical_bot(
-                    first_label, self.device, verbose_build=True
-                )
+                first = create_gpu_tactical_bot(first_label, self.device, verbose_build=True)
                 first._ext()
                 self._tactical_bots[first_label] = first
                 for label in GUI_TACTICAL_BOTS[1:]:
-                    self._tactical_bots[label] = create_gpu_tactical_bot(
-                        label, self.device
-                    )
+                    self._tactical_bots[label] = create_gpu_tactical_bot(label, self.device)
             except BaseException as exc:
                 self._bot_load_error = exc
             finally:
@@ -128,7 +138,6 @@ class Connect6CNNGUI(Connect6GUI):
             self._bot_load_error = None
             self.status.set("GPU Tactical Bot build failed - see error dialog/console")
             from tkinter import messagebox
-
             messagebox.showerror("GPU Tactical Bot build error", str(exc))
             return
 
@@ -148,18 +157,13 @@ class Connect6CNNGUI(Connect6GUI):
     def _bot_action(self, source: str) -> int:
         bot = self._get_tactical_bot(source)
         board = torch.from_numpy(self.game.board).to(
-            device=self.device,
-            dtype=torch.int8,
+            device=self.device, dtype=torch.int8
         ).unsqueeze(0)
         player = torch.tensor(
-            [int(self.game.current_player)],
-            dtype=torch.int8,
-            device=self.device,
+            [int(self.game.current_player)], dtype=torch.int8, device=self.device
         )
         stones_left = torch.tensor(
-            [int(self.game.stones_left_in_turn)],
-            dtype=torch.int8,
-            device=self.device,
+            [int(self.game.stones_left_in_turn)], dtype=torch.int8, device=self.device
         )
         action = int(bot.actions(board, player, stones_left)[0].item())
         if action < 0:
@@ -174,16 +178,11 @@ class Connect6CNNGUI(Connect6GUI):
         model, _ = self._get_model(source)
         board = torch.from_numpy(self.game.board).to(self.device).unsqueeze(0)
         player = torch.tensor(
-            [int(self.game.current_player)],
-            dtype=torch.int8,
-            device=self.device,
+            [int(self.game.current_player)], dtype=torch.int8, device=self.device
         )
         stones_left = torch.tensor(
-            [int(self.game.stones_left_in_turn)],
-            dtype=torch.int8,
-            device=self.device,
+            [int(self.game.stones_left_in_turn)], dtype=torch.int8, device=self.device
         )
-
         network_input = canonical_network_input(board, player, stones_left)
         legal = torch.from_numpy(self.game.legal_mask()).unsqueeze(0).to(self.device)
         logits, _ = model(network_input)
@@ -199,15 +198,10 @@ class Connect6CNNGUI(Connect6GUI):
         self._cancel_ai_job()
         if self.paused or self.game.done or self.current_source() == HUMAN:
             return
-
         if self.current_source() in GUI_TACTICAL_BOTS and not self._bots_ready():
             self._start_tactical_bot_loading()
             return
-
-        self.ai_job = self.root.after(
-            max(0, int(self.delay_ms.get())),
-            self._do_ai_step,
-        )
+        self.ai_job = self.root.after(max(0, int(self.delay_ms.get())), self._do_ai_step)
 
     def _reset_loaded_tactical_bots(self) -> None:
         for bot in self._tactical_bots.values():
