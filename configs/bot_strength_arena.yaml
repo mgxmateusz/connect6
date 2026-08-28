@@ -6,19 +6,19 @@ bot_strength_arena:
   # CNN gauntlet is filtered by tools/run_bot_strength_arena.py to even updates
   # only: model_update_2, 4, 6, ... . Bot-vs-bot and Cloudict are unchanged.
   # Existing results in output_dir are resumed: completed CNN rows, bot pairs,
-  # and Cloudict games are skipped; Hybrid only fills the missing work.
+  # and Cloudict games are skipped. New Hybrid96/Hybrid64 only fill missing work.
   # V3 = TOP16 -> C(16,2)=120 exact own pairs, no reply search.
   # V4 = TOP12 -> 66 exact own pairs -> TOP4 -> opponent V2 TOP6
   #      -> all C(6,2)=15 full two-stone reply pairs per finalist.
   # Pair = every legal own pair gets a cheap pair-aware score -> TOP128 pairs
   #        -> the same exact 924-road state evaluator as V3/Full.
-  # Hybrid = pure LiveRoad cell pool -> cheap pair-aware score for every pair
-  #          in that pool -> TOP128 -> exact state evaluator; no V2 pool floor.
+  # Hybrid variants = same pure LiveRoad pool and same cheap pair-aware score;
+  #                   only exact finalist budget changes: 128 / 96 / 64.
   # Live = every empty cell from every clean own/opponent road with >=2 stones;
   #        minimum pool width 16; exact brute force over every pair in the pool.
   # Full = exhaustive exact reference over every legal unordered pair C(E,2).
   # Small TOP12 is intentionally removed from the current experiment.
-  bots: ["v1", "v2", "v3", "v4", "pair", "hybrid", "live", "full"]
+  bots: ["v1", "v2", "v3", "v4", "pair", "hybrid", "hybrid96", "hybrid64", "live", "full"]
 
   models_per_batch: 512
   native_load_chunk_models: 32
