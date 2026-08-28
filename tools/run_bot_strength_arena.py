@@ -10,6 +10,7 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV2Pro,
+    GPUTacticalBotV2Pro2,
     GPUTacticalBotV3,
     GPUTacticalBotV4,
     GPUTacticalBotFullPair,
@@ -37,11 +38,12 @@ _legacy.discover_checkpoints = _discover_even_checkpoints
 
 
 # Arena is resumable. Every experimental bot has its own key/signature, so
-# adding V2 Pro only appends its missing CNN/H2H/Cloudict work in the same run.
+# adding Pro variants only appends their missing CNN/H2H/Cloudict work.
 _base.BOT_SPECS = (
     _model_arena.BotSpec("v1", "GPU Tactical Bot V1", "gpu_tactical_bot_heuristic_v1", GPUTacticalBot),
     _model_arena.BotSpec("v2", "GPU Tactical Bot V2", "gpu_tactical_bot_heuristic_v2", GPUTacticalBotV2),
     _model_arena.BotSpec("v2pro", "GPU Tactical Bot V2 Pro LatentFork", "gpu_tactical_bot_v2pro_latentfork_v1", GPUTacticalBotV2Pro),
+    _model_arena.BotSpec("v2pro2", "GPU Tactical Bot V2 Pro2 PairForce", "gpu_tactical_bot_v2pro2_pairforce_v1", GPUTacticalBotV2Pro2),
     _model_arena.BotSpec("v3", "GPU Tactical Bot V3 Top16 Pair-State", "gpu_tactical_bot_v3_top16_pair_state_v1", GPUTacticalBotV3),
     _model_arena.BotSpec("v4", "GPU Tactical Bot V4 Top12 ReplyPair6", "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1", GPUTacticalBotV4),
     _model_arena.BotSpec("pair", "GPU Tactical Bot PairFirst AllPairs P128", "gpu_tactical_bot_pairfirst_allpairs_p128_v1", GPUTacticalBotPairFirst),
