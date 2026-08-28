@@ -13,10 +13,9 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBotV4,
     GPUTacticalBotFullPair,
     GPUTacticalBotPairFirst,
+    GPUTacticalBotPairFirst32,
     GPUTacticalBotLiveRoad,
     GPUTacticalBotHybrid,
-    GPUTacticalBotHybrid96,
-    GPUTacticalBotHybrid64,
     GPUTacticalBotHybrid32,
 )
 from connect6.championship import bot_arena as _model_arena
@@ -25,9 +24,6 @@ from connect6.evaluation import bot_strength_arena as _base
 from connect6.evaluation import cloudict_arena as _cloudict
 
 
-# The CNN gauntlet intentionally uses only even-numbered autosaves:
-# model_update_00000002.pt, 00000004.pt, ... . Bot-vs-bot and Cloudict do not
-# use discover_checkpoints(), so they are unaffected by this filter.
 _OriginalDiscoverCheckpoints = _legacy.discover_checkpoints
 
 
@@ -39,82 +35,23 @@ def _discover_even_checkpoints(directory):
 _legacy.discover_checkpoints = _discover_even_checkpoints
 
 
-# All registered bots below are normal arena participants. The arena is
-# resumable: existing per-bot CNN rows, bot-vs-bot pairs and Cloudict games are
-# skipped, so adding a new bot only fills the missing work in the same output.
+# Arena is resumable. Pair32 gets its own key/signature so existing Pair128 and
+# all historical rows remain untouched; only missing Pair32 work is appended.
 _base.BOT_SPECS = (
-    _model_arena.BotSpec(
-        "v1",
-        "GPU Tactical Bot V1",
-        "gpu_tactical_bot_heuristic_v1",
-        GPUTacticalBot,
-    ),
-    _model_arena.BotSpec(
-        "v2",
-        "GPU Tactical Bot V2",
-        "gpu_tactical_bot_heuristic_v2",
-        GPUTacticalBotV2,
-    ),
-    _model_arena.BotSpec(
-        "v3",
-        "GPU Tactical Bot V3 Top16 Pair-State",
-        "gpu_tactical_bot_v3_top16_pair_state_v1",
-        GPUTacticalBotV3,
-    ),
-    _model_arena.BotSpec(
-        "v4",
-        "GPU Tactical Bot V4 Top12 ReplyPair6",
-        "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1",
-        GPUTacticalBotV4,
-    ),
-    _model_arena.BotSpec(
-        "pair",
-        "GPU Tactical Bot PairFirst AllPairs P128",
-        "gpu_tactical_bot_pairfirst_allpairs_p128_v1",
-        GPUTacticalBotPairFirst,
-    ),
-    _model_arena.BotSpec(
-        "hybrid",
-        "GPU Tactical Bot Hybrid LiveRoad Pair128",
-        "gpu_tactical_bot_hybrid_liveroad_pair128_v1",
-        GPUTacticalBotHybrid,
-    ),
-    _model_arena.BotSpec(
-        "hybrid96",
-        "GPU Tactical Bot Hybrid LiveRoad Pair96",
-        "gpu_tactical_bot_hybrid_liveroad_pair96_v1",
-        GPUTacticalBotHybrid96,
-    ),
-    _model_arena.BotSpec(
-        "hybrid64",
-        "GPU Tactical Bot Hybrid LiveRoad Pair64",
-        "gpu_tactical_bot_hybrid_liveroad_pair64_v1",
-        GPUTacticalBotHybrid64,
-    ),
-    _model_arena.BotSpec(
-        "hybrid32",
-        "GPU Tactical Bot Hybrid LiveRoad Pair32",
-        "gpu_tactical_bot_hybrid_liveroad_pair32_v1",
-        GPUTacticalBotHybrid32,
-    ),
-    _model_arena.BotSpec(
-        "live",
-        "GPU Tactical Bot LiveRoad Brute Force",
-        "gpu_tactical_bot_liveroad_ge2_min16_bruteforce_v1",
-        GPUTacticalBotLiveRoad,
-    ),
-    _model_arena.BotSpec(
-        "full",
-        "GPU Tactical Bot Full Pair Brute Force",
-        "gpu_tactical_bot_full_pair_bruteforce_v1",
-        GPUTacticalBotFullPair,
-    ),
+    _model_arena.BotSpec("v1", "GPU Tactical Bot V1", "gpu_tactical_bot_heuristic_v1", GPUTacticalBot),
+    _model_arena.BotSpec("v2", "GPU Tactical Bot V2", "gpu_tactical_bot_heuristic_v2", GPUTacticalBotV2),
+    _model_arena.BotSpec("v3", "GPU Tactical Bot V3 Top16 Pair-State", "gpu_tactical_bot_v3_top16_pair_state_v1", GPUTacticalBotV3),
+    _model_arena.BotSpec("v4", "GPU Tactical Bot V4 Top12 ReplyPair6", "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1", GPUTacticalBotV4),
+    _model_arena.BotSpec("pair", "GPU Tactical Bot PairFirst AllPairs P128", "gpu_tactical_bot_pairfirst_allpairs_p128_v1", GPUTacticalBotPairFirst),
+    _model_arena.BotSpec("pair32", "GPU Tactical Bot PairFirst AllPairs P32", "gpu_tactical_bot_pairfirst_allpairs_p32_v1", GPUTacticalBotPairFirst32),
+    _model_arena.BotSpec("hybrid", "GPU Tactical Bot Hybrid LiveRoad Pair128", "gpu_tactical_bot_hybrid_liveroad_pair128_v1", GPUTacticalBotHybrid),
+    _model_arena.BotSpec("hybrid32", "GPU Tactical Bot Hybrid LiveRoad Pair32", "gpu_tactical_bot_hybrid_liveroad_pair32_v1", GPUTacticalBotHybrid32),
+    _model_arena.BotSpec("live", "GPU Tactical Bot LiveRoad Brute Force", "gpu_tactical_bot_liveroad_ge2_min16_bruteforce_v1", GPUTacticalBotLiveRoad),
+    _model_arena.BotSpec("full", "GPU Tactical Bot Full Pair Brute Force", "gpu_tactical_bot_full_pair_bruteforce_v1", GPUTacticalBotFullPair),
 )
 _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
 
 
-# In bot-vs-bot, draws are diagnostic but should not pull every comparison
-# toward 50%. Report the win share among decisive games: wins/(wins+losses).
 def _decisive_pair_rows(pair_rows):
     converted = []
     for raw in pair_rows:
