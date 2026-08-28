@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
+    GPUTacticalBotV2Pro,
     GPUTacticalBotV3,
     GPUTacticalBotV4,
     GPUTacticalBotPairFirst,
@@ -37,6 +38,7 @@ CENTER = CENTER_ROW * BOARD + CENTER_COL
 BOT_SPECS = (
     ("v1", "GPU Tactical Bot V1", GPUTacticalBot),
     ("v2", "GPU Tactical Bot V2", GPUTacticalBotV2),
+    ("v2pro", "GPU Tactical Bot V2 Pro LatentFork", GPUTacticalBotV2Pro),
     ("v3", "GPU Tactical Bot V3 Top16 Pair-State", GPUTacticalBotV3),
     ("v4", "GPU Tactical Bot V4 Top12 ReplyPair6", GPUTacticalBotV4),
     ("pair", "GPU Tactical Bot PairFirst AllPairs P128", GPUTacticalBotPairFirst),
