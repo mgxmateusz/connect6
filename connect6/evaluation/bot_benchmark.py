@@ -9,15 +9,22 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV2Pro,
-    GPUTacticalBotV2Pro2,
     GPUTacticalBotV3,
+    GPUTacticalBotV3Pro,
     GPUTacticalBotV4,
+    GPUTacticalBotV4Pro,
     GPUTacticalBotFullPair,
+    GPUTacticalBotFullPairPro,
     GPUTacticalBotPairFirst,
+    GPUTacticalBotPairFirstPro,
     GPUTacticalBotPairFirst32,
+    GPUTacticalBotPairFirst32Pro,
     GPUTacticalBotLiveRoad,
+    GPUTacticalBotLiveRoadPro,
     GPUTacticalBotHybrid,
+    GPUTacticalBotHybridPro,
     GPUTacticalBotHybrid32,
+    GPUTacticalBotHybrid32Pro,
 )
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
@@ -153,15 +160,22 @@ def main() -> None:
     bot_v1 = GPUTacticalBot(device)
     bot_v2 = GPUTacticalBotV2(device)
     bot_v2pro = GPUTacticalBotV2Pro(device)
-    bot_v2pro2 = GPUTacticalBotV2Pro2(device)
     bot_v3 = GPUTacticalBotV3(device)
+    bot_v3pro = GPUTacticalBotV3Pro(device)
     bot_v4 = GPUTacticalBotV4(device)
+    bot_v4pro = GPUTacticalBotV4Pro(device)
     bot_p128 = GPUTacticalBotPairFirst(device)
+    bot_p128pro = GPUTacticalBotPairFirstPro(device)
     bot_p32 = GPUTacticalBotPairFirst32(device)
+    bot_p32pro = GPUTacticalBotPairFirst32Pro(device)
     bot_h128 = GPUTacticalBotHybrid(device)
+    bot_h128pro = GPUTacticalBotHybridPro(device)
     bot_h32 = GPUTacticalBotHybrid32(device)
+    bot_h32pro = GPUTacticalBotHybrid32Pro(device)
     bot_live = GPUTacticalBotLiveRoad(device)
+    bot_livepro = GPUTacticalBotLiveRoadPro(device)
     bot_full = GPUTacticalBotFullPair(device)
+    bot_fullpro = GPUTacticalBotFullPairPro(device)
 
     tr_cfg = payload.get("config", {}).get("training", {})
     amp_enabled = bool(tr_cfg.get("amp", True))
@@ -172,11 +186,15 @@ def main() -> None:
     seed_player = torch.ones(1, dtype=torch.int8, device=device)
     seed_left_one = torch.ones(1, dtype=torch.int8, device=device)
     seed_left_two = torch.full((1,), 2, dtype=torch.int8, device=device)
-    bot_v1.actions(seed_board, seed_player, seed_left_one)
-    bot_v2.actions(seed_board, seed_player, seed_left_one)
-    bot_v2pro.actions(seed_board, seed_player, seed_left_one)
-    bot_v2pro2.actions(seed_board, seed_player, seed_left_one)
-    for bot in (bot_v3, bot_v4, bot_p128, bot_p32, bot_h128, bot_h32, bot_live, bot_full):
+    for bot in (bot_v1, bot_v2, bot_v2pro):
+        bot.actions(seed_board, seed_player, seed_left_one)
+    search_bots = (
+        bot_v3, bot_v3pro, bot_v4, bot_v4pro,
+        bot_p128, bot_p128pro, bot_p32, bot_p32pro,
+        bot_h128, bot_h128pro, bot_h32, bot_h32pro,
+        bot_live, bot_livepro, bot_full, bot_fullpro,
+    )
+    for bot in search_bots:
         bot.reset()
         bot.actions(seed_board, seed_player, seed_left_two)
         bot.actions(seed_board, seed_player, seed_left_one)
@@ -184,17 +202,18 @@ def main() -> None:
 
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"Checkpoint: {checkpoint}")
-    print("V2 Pro: one-cell latent-fork/road-leverage detection.")
-    print("V2 Pro2: same V2Pro base plus local X+Y pair-force detection for 2->4/3->5/4->6.")
-    print("Pair128/32: every legal pair gets the same cheap pair-aware score; only exact finalist count changes.")
-    print("Hybrid128/32: same pure LiveRoad pool + same cheap pair score; only exact finalist count changes.")
+    print("Pro twins keep each baseline search/evaluator/pool unchanged and replace only V2 ordering/prior with V2Pro.")
+    print("Pair/Hybrid Pro add V2Pro(first)+V2Pro(second) at scale 1 to the existing cheap pair score.")
     print()
     print(
-        f"{'batch':>6} | {'stones':>11} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | {'V2Pro':>8} | {'V2Pro2':>8} | "
-        f"{'V3 ms':>9} | {'V4 ms':>9} | {'P128':>9} | {'P32':>9} | {'H128':>9} | {'H32':>9} | "
-        f"{'LiveRoad':>10} | {'Full':>10} | {'P2/P1':>7} | {'P2/V2':>7} | {'P32/CNN':>8} | {'H32/CNN':>8}"
+        f"{'batch':>6} | {'stones':>11} | {'CNN':>8} | {'V1':>7} | {'V2':>7} | {'V2Pro':>7} | "
+        f"{'V3':>8} | {'V3Pro':>8} | {'V4':>8} | {'V4Pro':>8} | "
+        f"{'P128':>8} | {'P128Pro':>8} | {'P32':>8} | {'P32Pro':>8} | "
+        f"{'H128':>8} | {'H128Pro':>8} | {'H32':>8} | {'H32Pro':>8} | "
+        f"{'Live':>9} | {'LivePro':>9} | {'Full':>9} | {'FullPro':>9} | "
+        f"{'V3P/V3':>7} | {'V4P/V4':>7} | {'P32P/P32':>8} | {'H32P/H32':>8}"
     )
-    print("-" * 207)
+    print("-" * 240)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left, stone_counts = _make_legal_positions(
@@ -213,20 +232,29 @@ def main() -> None:
         v1_ms = _elapsed_ms(lambda: bot_v1.actions(boards, players, left), args.warmup, args.iters)
         v2_ms = _elapsed_ms(lambda: bot_v2.actions(boards, players, left), args.warmup, args.iters)
         v2pro_ms = _elapsed_ms(lambda: bot_v2pro.actions(boards, players, left), args.warmup, args.iters)
-        v2pro2_ms = _elapsed_ms(lambda: bot_v2pro2.actions(boards, players, left), args.warmup, args.iters)
-        v3_ms = _elapsed_search_avg_decision_ms(bot_v3, boards, players, warmup=args.warmup, iterations=args.iters)
-        v4_ms = _elapsed_search_avg_decision_ms(bot_v4, boards, players, warmup=args.warmup, iterations=args.iters)
-        p128_ms = _elapsed_search_avg_decision_ms(bot_p128, boards, players, warmup=args.warmup, iterations=args.iters)
-        p32_ms = _elapsed_search_avg_decision_ms(bot_p32, boards, players, warmup=args.warmup, iterations=args.iters)
-        h128_ms = _elapsed_search_avg_decision_ms(bot_h128, boards, players, warmup=args.warmup, iterations=args.iters)
-        h32_ms = _elapsed_search_avg_decision_ms(bot_h32, boards, players, warmup=args.warmup, iterations=args.iters)
-        live_ms = _elapsed_search_avg_decision_ms(bot_live, boards, players, warmup=args.heavy_warmup, iterations=args.heavy_iters)
-        full_ms = _elapsed_search_avg_decision_ms(bot_full, boards, players, warmup=args.heavy_warmup, iterations=args.heavy_iters)
+
+        def normal(bot):
+            return _elapsed_search_avg_decision_ms(bot, boards, players, warmup=args.warmup, iterations=args.iters)
+
+        def heavy(bot):
+            return _elapsed_search_avg_decision_ms(bot, boards, players, warmup=args.heavy_warmup, iterations=args.heavy_iters)
+
+        v3_ms, v3p_ms = normal(bot_v3), normal(bot_v3pro)
+        v4_ms, v4p_ms = normal(bot_v4), normal(bot_v4pro)
+        p128_ms, p128p_ms = normal(bot_p128), normal(bot_p128pro)
+        p32_ms, p32p_ms = normal(bot_p32), normal(bot_p32pro)
+        h128_ms, h128p_ms = normal(bot_h128), normal(bot_h128pro)
+        h32_ms, h32p_ms = normal(bot_h32), normal(bot_h32pro)
+        live_ms, livep_ms = heavy(bot_live), heavy(bot_livepro)
+        full_ms, fullp_ms = heavy(bot_full), heavy(bot_fullpro)
 
         print(
-            f"{batch:6d} | {stone_label:>11} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | {v2pro_ms:8.4f} | {v2pro2_ms:8.4f} | "
-            f"{v3_ms:9.4f} | {v4_ms:9.4f} | {p128_ms:9.4f} | {p32_ms:9.4f} | {h128_ms:9.4f} | {h32_ms:9.4f} | "
-            f"{live_ms:10.4f} | {full_ms:10.4f} | {v2pro2_ms/v2pro_ms:7.3f} | {v2pro2_ms/v2_ms:7.3f} | {p32_ms/model_ms:8.3f} | {h32_ms/model_ms:8.3f}"
+            f"{batch:6d} | {stone_label:>11} | {model_ms:8.4f} | {v1_ms:7.4f} | {v2_ms:7.4f} | {v2pro_ms:7.4f} | "
+            f"{v3_ms:8.4f} | {v3p_ms:8.4f} | {v4_ms:8.4f} | {v4p_ms:8.4f} | "
+            f"{p128_ms:8.4f} | {p128p_ms:8.4f} | {p32_ms:8.4f} | {p32p_ms:8.4f} | "
+            f"{h128_ms:8.4f} | {h128p_ms:8.4f} | {h32_ms:8.4f} | {h32p_ms:8.4f} | "
+            f"{live_ms:9.4f} | {livep_ms:9.4f} | {full_ms:9.4f} | {fullp_ms:9.4f} | "
+            f"{v3p_ms/v3_ms:7.3f} | {v4p_ms/v4_ms:7.3f} | {p32p_ms/p32_ms:8.3f} | {h32p_ms/h32_ms:8.3f}"
         )
 
 
