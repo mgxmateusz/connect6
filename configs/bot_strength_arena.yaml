@@ -4,17 +4,31 @@ bot_strength_arena:
   device: "cuda"
 
   # CNN gauntlet is filtered by tools/run_bot_strength_arena.py to even updates
-  # only: model_update_2, 4, 6, ... . Existing results are resumed in-place.
-  # V2 Pro = same one-cell architecture as V2, with latent-fork/road-leverage
-  #          scoring for clean 2->3 and 3->4 structures before immediate threats.
-  # V2 Pro2 = V2 Pro plus local partner-aware pair-force scoring for X+Y
-  #           transitions 2->4 / 3->5 / 4->6 on shared six-cell roads.
-  # Pair128/Pair32 = every legal pair gets the same cheap pair-aware score;
-  #                  only exact finalist budget changes: 128 vs 32.
-  # Hybrid128/Hybrid32 = same pure LiveRoad pool and same cheap pair-aware score;
-  #                      only exact finalist budget changes: 128 vs 32.
-  # Hybrid96/Hybrid64 are no longer active participants; historical rows remain.
-  bots: ["v1", "v2", "v2pro", "v2pro2", "v3", "v4", "pair", "pair32", "hybrid", "hybrid32", "live", "full"]
+  # only: model_update_2, 4, 6, ... . Existing baseline results are resumed in-place.
+  #
+  # V2Pro is the validated one-cell latent-fork/road-leverage scorer.
+  # Every "*pro" search bot below keeps the corresponding baseline search depth,
+  # exact evaluator, candidate budget and (where applicable) structural pool.
+  # Only the V2 ordering/prior is replaced by V2Pro:
+  # - V3Pro: V2Pro TOP16 cells.
+  # - V4Pro: V2Pro own TOP12 and opponent TOP6 reply cells.
+  # - PairPro: same all-legal-pair cheap scorer + V2Pro endpoint prior, same K.
+  # - HybridPro: same pure LiveRoad pool + same cheap scorer + endpoint prior, same K.
+  # - LivePro: same LiveRoad brute pool; V2Pro sparse TOP16 floor/tie ordering.
+  # - FullPro: same exhaustive pair search; V2Pro only tie/single-stone ordering.
+  #
+  # V2Pro2 is no longer active. Its historical CSV/source can remain for comparison.
+  bots: [
+    "v1", "v2", "v2pro",
+    "v3", "v3pro",
+    "v4", "v4pro",
+    "pair", "pairpro",
+    "pair32", "pair32pro",
+    "hybrid", "hybridpro",
+    "hybrid32", "hybrid32pro",
+    "live", "livepro",
+    "full", "fullpro"
+  ]
 
   models_per_batch: 512
   native_load_chunk_models: 32
