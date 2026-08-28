@@ -9,6 +9,7 @@ import torch
 from .gpu_bot import (
     GPU_TACTICAL_BOT,
     GPU_TACTICAL_BOT_V2,
+    GPU_TACTICAL_BOT_V2_PRO,
     GPU_TACTICAL_BOT_V3,
     GPU_TACTICAL_BOT_V4,
     GPU_TACTICAL_BOT_FULL_PAIR,
@@ -27,6 +28,7 @@ from .vector_env import canonical_network_input
 GUI_TACTICAL_BOTS = (
     GPU_TACTICAL_BOT,
     GPU_TACTICAL_BOT_V2,
+    GPU_TACTICAL_BOT_V2_PRO,
     GPU_TACTICAL_BOT_V3,
     GPU_TACTICAL_BOT_V4,
     GPU_TACTICAL_BOT_PAIRFIRST,
