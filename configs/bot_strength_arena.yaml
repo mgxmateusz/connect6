@@ -4,22 +4,13 @@ bot_strength_arena:
   device: "cuda"
 
   # CNN gauntlet is filtered by tools/run_bot_strength_arena.py to even updates
-  # only: model_update_2, 4, 6, ... . Bot-vs-bot and Cloudict are unchanged.
-  # Existing results in output_dir are resumed: completed CNN rows, bot pairs,
-  # and Cloudict games are skipped. Removing Hybrid96/Hybrid64 from this active
-  # list does not delete or reset any historical CSV rows already on disk.
-  # V3 = TOP16 -> C(16,2)=120 exact own pairs, no reply search.
-  # V4 = TOP12 -> 66 exact own pairs -> TOP4 -> opponent V2 TOP6
-  #      -> all C(6,2)=15 full two-stone reply pairs per finalist.
-  # Pair = every legal own pair gets a cheap pair-aware score -> TOP128 pairs
-  #        -> the same exact 924-road state evaluator as V3/Full.
+  # only: model_update_2, 4, 6, ... . Existing results are resumed in-place.
+  # Pair128/Pair32 = every legal pair gets the same cheap pair-aware score;
+  #                  only exact finalist budget changes: 128 vs 32.
   # Hybrid128/Hybrid32 = same pure LiveRoad pool and same cheap pair-aware score;
   #                      only exact finalist budget changes: 128 vs 32.
-  # Live = every empty cell from every clean own/opponent road with >=2 stones;
-  #        minimum pool width 16; exact brute force over every pair in the pool.
-  # Full = exhaustive exact reference over every legal unordered pair C(E,2).
-  # Small TOP12 and Hybrid96/Hybrid64 are not active arena participants.
-  bots: ["v1", "v2", "v3", "v4", "pair", "hybrid", "hybrid32", "live", "full"]
+  # Hybrid96/Hybrid64 are no longer active participants; historical rows remain.
+  bots: ["v1", "v2", "v3", "v4", "pair", "pair32", "hybrid", "hybrid32", "live", "full"]
 
   models_per_batch: 512
   native_load_chunk_models: 32
@@ -32,13 +23,9 @@ bot_strength_arena:
     executable: "C:\\PRACA\\ConnectMore\\engines\\cloudict.exe"
     depths: [2, 3, 4]
     opening_sizes:
-      # D2/D3 stay unchanged: center 3x3 = 9 openings x 2 colours = 18 games.
       2: 3
       3: 3
-      # D4 is deliberately reduced to the exact center only: 1 opening x
-      # 2 colours = 2 games per bot, because D4 is dramatically slower.
       4: 1
     vcf: false
     timeout_seconds: 60.0
-    # <= 0 = unlimited retries, but only for known recoverable crash/timeout errors.
     max_restarts: 0
