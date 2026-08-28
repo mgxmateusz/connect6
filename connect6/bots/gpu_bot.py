@@ -16,6 +16,7 @@ GPU_TACTICAL_BOT_LIVEROAD = "GPU Tactical Bot LiveRoad Brute Force"
 GPU_TACTICAL_BOT_HYBRID = "GPU Tactical Bot Hybrid LiveRoad Pair128"
 GPU_TACTICAL_BOT_HYBRID96 = "GPU Tactical Bot Hybrid LiveRoad Pair96"
 GPU_TACTICAL_BOT_HYBRID64 = "GPU Tactical Bot Hybrid LiveRoad Pair64"
+GPU_TACTICAL_BOT_HYBRID32 = "GPU Tactical Bot Hybrid LiveRoad Pair32"
 # Training/native rollout still only knows the stateless V1/V2 actors.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
@@ -194,6 +195,13 @@ class GPUTacticalBotHybrid64(_SearchGPUTacticalBot):
     label = GPU_TACTICAL_BOT_HYBRID64
 
 
+class GPUTacticalBotHybrid32(_SearchGPUTacticalBot):
+    """Controlled Hybrid variant: same pool/cheap score, TOP32 exact finalists."""
+
+    entrypoint = "tactical_bot_hybrid32_actions"
+    label = GPU_TACTICAL_BOT_HYBRID32
+
+
 # Compatibility name used by older arena modules.
 GPUTacticalBotV4B8x2 = GPUTacticalBotV4
 
@@ -235,4 +243,6 @@ def create_gpu_tactical_bot(
         return GPUTacticalBotHybrid96(device, verbose_build=verbose_build)
     if label == GPU_TACTICAL_BOT_HYBRID64:
         return GPUTacticalBotHybrid64(device, verbose_build=verbose_build)
+    if label == GPU_TACTICAL_BOT_HYBRID32:
+        return GPUTacticalBotHybrid32(device, verbose_build=verbose_build)
     raise ValueError(f"Unknown GPU tactical bot: {label}")
