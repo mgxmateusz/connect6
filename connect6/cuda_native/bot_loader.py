@@ -38,24 +38,24 @@ def load_native_bot_extension(*, verbose: bool = False):
 
     root = Path(__file__).resolve().parent
     sources = [
-        str(root / "native_bot_v23.cpp"),
+        str(root / "native_bot_v24.cpp"),
         str(root / "native_bot_kernel.cu"),
         str(root / "native_bot_v2_pro_kernel.cu"),
-        # Each Pro TU includes its unchanged baseline implementation, then adds
-        # the scorer-only experimental twin. This avoids duplicate symbols and
-        # keeps baseline-vs-Pro search/evaluator code in the same translation unit.
+        # V3Pro/V4Pro TUs include their baseline implementation internally,
+        # but only the validated Pro entrypoints are exported by v24.
         str(root / "native_bot_v3_pro_kernel.cu"),
-        str(root / "native_bot_small_kernel.cu"),
         str(root / "native_bot_v4_pro_kernel.cu"),
-        str(root / "native_bot_full_pair_pro_kernel.cu"),
-        str(root / "native_bot_pairfirst_pro_kernel.cu"),
-        str(root / "native_bot_liveroad_pro_kernel.cu"),
-        str(root / "native_bot_hybrid_pro_kernel.cu"),
+        str(root / "native_bot_pairfirst_variants32_kernel.cu"),
+        str(root / "native_bot_hybrid_liveroad_pair_variants32_kernel.cu"),
+        str(root / "native_bot_liveroad_kernel.cu"),
+        str(root / "native_bot_full_pair_kernel.cu"),
     ]
 
-    # v23 removes V2Pro2 from the active extension and adds controlled V2Pro
-    # scorer/prior twins for every active search family from V3 onward.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v23"
+    # v24 keeps only validated/public variants:
+    # V1, V2, V2Pro, V3Pro, V4Pro, Pair P128/P32, Hybrid H128/H32,
+    # LiveRoad and Full Pair. Failed Pair/Hybrid/Live/Full Pro twins and
+    # baseline V3/V4 are no longer exposed or compiled as standalone sources.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v24"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -73,8 +73,8 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(f"[BOT BUILD] extension: {extension_name}", flush=True)
     print(f"[BOT BUILD] build dir: {build_directory}", flush=True)
     print(
-        "[BOT BUILD] First use compiles V1/V2/V2Pro + baseline/Pro V3, V4, "
-        "PairFirst P128/P32, Hybrid H128/H32, LiveRoad and Full Pair kernels; "
+        "[BOT BUILD] First use compiles V1/V2/V2Pro, V3Pro, V4Pro, "
+        "PairFirst P128/P32, Hybrid H128/H32, LiveRoad and Full Pair; "
         "later runs use the cache.",
         flush=True,
     )
