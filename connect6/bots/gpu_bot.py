@@ -168,7 +168,10 @@ class GPUTacticalBotHybrid32(_SearchGPUTacticalBot):
     label = GPU_TACTICAL_BOT_HYBRID32
 
 
-# Compatibility names for old callers. They now resolve to the validated Pro variants.
+# Legacy imports still used by old arena modules. These are aliases to the
+# validated Pro bots, not separate baseline V3/V4 implementations.
+GPUTacticalBotV3 = GPUTacticalBotV3Pro
+GPUTacticalBotV4 = GPUTacticalBotV4Pro
 GPUTacticalBotV4B8x2 = GPUTacticalBotV4Pro
 
 
