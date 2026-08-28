@@ -13,6 +13,7 @@ from .gpu_bot import (
     GPU_TACTICAL_BOT_V4,
     GPU_TACTICAL_BOT_FULL_PAIR,
     GPU_TACTICAL_BOT_PAIRFIRST,
+    GPU_TACTICAL_BOT_PAIRFIRST32,
     GPU_TACTICAL_BOT_LIVEROAD,
     GPU_TACTICAL_BOT_HYBRID,
     GPU_TACTICAL_BOT_HYBRID32,
@@ -29,6 +30,7 @@ GUI_TACTICAL_BOTS = (
     GPU_TACTICAL_BOT_V3,
     GPU_TACTICAL_BOT_V4,
     GPU_TACTICAL_BOT_PAIRFIRST,
+    GPU_TACTICAL_BOT_PAIRFIRST32,
     GPU_TACTICAL_BOT_HYBRID,
     GPU_TACTICAL_BOT_HYBRID32,
     GPU_TACTICAL_BOT_LIVEROAD,
@@ -45,8 +47,6 @@ class Connect6CNNGUI(Connect6GUI):
         super().__init__(root, runs_dir)
 
     def refresh_models(self) -> None:
-        # Preserve tactical-bot selections because the base implementation knows
-        # only Human + checkpoint entries and would otherwise reset them to Human.
         black_before = self.black_source.get()
         white_before = self.white_source.get()
         super().refresh_models()
@@ -91,8 +91,6 @@ class Connect6CNNGUI(Connect6GUI):
 
         def worker() -> None:
             try:
-                # All tactical bots share one native extension. Force the build
-                # once, then create lightweight wrappers for every active bot.
                 first_label = GUI_TACTICAL_BOTS[0]
                 first = create_gpu_tactical_bot(
                     first_label, self.device, verbose_build=True
@@ -103,7 +101,7 @@ class Connect6CNNGUI(Connect6GUI):
                     self._tactical_bots[label] = create_gpu_tactical_bot(
                         label, self.device
                     )
-            except BaseException as exc:  # propagate to Tk thread via polling
+            except BaseException as exc:
                 self._bot_load_error = exc
             finally:
                 self._bot_loading = False
@@ -170,7 +168,6 @@ class Connect6CNNGUI(Connect6GUI):
             return self._bot_action(source)
 
         model, _ = self._get_model(source)
-
         board = torch.from_numpy(self.game.board).to(self.device).unsqueeze(0)
         player = torch.tensor(
             [int(self.game.current_player)],
@@ -183,25 +180,14 @@ class Connect6CNNGUI(Connect6GUI):
             device=self.device,
         )
 
-        network_input = canonical_network_input(
-            board,
-            player,
-            stones_left,
-        )
-
-        legal = (
-            torch.from_numpy(self.game.legal_mask())
-            .unsqueeze(0)
-            .to(self.device)
-        )
-
+        network_input = canonical_network_input(board, player, stones_left)
+        legal = torch.from_numpy(self.game.legal_mask()).unsqueeze(0).to(self.device)
         logits, _ = model(network_input)
         logits = mask_logits(logits.float(), legal)
 
         temp = float(self.temperature.get())
         if temp <= 0:
             return int(logits.argmax(dim=1).item())
-
         probs = torch.softmax(logits / max(temp, 1e-4), dim=1)
         return int(torch.multinomial(probs, 1).item())
 
@@ -220,9 +206,6 @@ class Connect6CNNGUI(Connect6GUI):
         )
 
     def _reset_loaded_tactical_bots(self) -> None:
-        # Search bots cache the second stone of a planned pair. Clear that cache
-        # before every fresh GUI game so an interrupted old game cannot leak a
-        # pending action into the next one.
         for bot in self._tactical_bots.values():
             reset = getattr(bot, "reset", None)
             if callable(reset):
@@ -231,8 +214,6 @@ class Connect6CNNGUI(Connect6GUI):
     def new_game(self) -> None:
         self._reset_loaded_tactical_bots()
         super().new_game()
-        # If either bot is selected for either side, compile the shared native
-        # extension immediately in the background.
         if self._bot_selected() and not self._bots_ready():
             self._start_tactical_bot_loading()
 
