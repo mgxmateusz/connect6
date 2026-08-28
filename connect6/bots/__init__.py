@@ -13,6 +13,7 @@ sys.modules.setdefault(__name__ + ".cuda_native.bot_loader", _bot_loader)
 from .gpu_bot import (  # noqa: E402
     GPU_TACTICAL_BOT,
     GPU_TACTICAL_BOT_V2,
+    GPU_TACTICAL_BOT_V2_PRO,
     GPU_TACTICAL_BOT_V3,
     GPU_TACTICAL_BOT_SMALL,
     GPU_TACTICAL_BOT_V4,
@@ -20,6 +21,7 @@ from .gpu_bot import (  # noqa: E402
     GPU_TACTICAL_BOTS,
     GPUTacticalBot,
     GPUTacticalBotV2,
+    GPUTacticalBotV2Pro,
     GPUTacticalBotV3,
     GPUTacticalBotSmall,
     GPUTacticalBotV4,
@@ -30,6 +32,7 @@ from .gpu_bot import (  # noqa: E402
 __all__ = [
     "GPU_TACTICAL_BOT",
     "GPU_TACTICAL_BOT_V2",
+    "GPU_TACTICAL_BOT_V2_PRO",
     "GPU_TACTICAL_BOT_V3",
     "GPU_TACTICAL_BOT_SMALL",
     "GPU_TACTICAL_BOT_V4",
@@ -37,6 +40,7 @@ __all__ = [
     "GPU_TACTICAL_BOTS",
     "GPUTacticalBot",
     "GPUTacticalBotV2",
+    "GPUTacticalBotV2Pro",
     "GPUTacticalBotV3",
     "GPUTacticalBotSmall",
     "GPUTacticalBotV4",
