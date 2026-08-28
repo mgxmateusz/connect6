@@ -8,18 +8,26 @@ from .cuda_native.bot_loader import load_native_bot_extension
 GPU_TACTICAL_BOT = "GPU Tactical Bot V1"
 GPU_TACTICAL_BOT_V2 = "GPU Tactical Bot V2"
 GPU_TACTICAL_BOT_V2_PRO = "GPU Tactical Bot V2 Pro LatentFork"
-GPU_TACTICAL_BOT_V2_PRO2 = "GPU Tactical Bot V2 Pro2 PairForce"
 GPU_TACTICAL_BOT_V3 = "GPU Tactical Bot V3 Top16 Pair-State"
+GPU_TACTICAL_BOT_V3_PRO = "GPU Tactical Bot V3 Pro Top16 Pair-State"
 GPU_TACTICAL_BOT_SMALL = "GPU Tactical Bot Small Top12 Pair-State"
 GPU_TACTICAL_BOT_V4 = "GPU Tactical Bot V4 Top12 ReplyPair6"
+GPU_TACTICAL_BOT_V4_PRO = "GPU Tactical Bot V4 Pro Top12 ReplyPair6"
 GPU_TACTICAL_BOT_FULL_PAIR = "GPU Tactical Bot Full Pair Brute Force"
+GPU_TACTICAL_BOT_FULL_PAIR_PRO = "GPU Tactical Bot Full Pair Pro Brute Force"
 GPU_TACTICAL_BOT_PAIRFIRST = "GPU Tactical Bot PairFirst AllPairs P128"
+GPU_TACTICAL_BOT_PAIRFIRST_PRO = "GPU Tactical Bot PairFirst Pro AllPairs P128"
 GPU_TACTICAL_BOT_PAIRFIRST32 = "GPU Tactical Bot PairFirst AllPairs P32"
+GPU_TACTICAL_BOT_PAIRFIRST32_PRO = "GPU Tactical Bot PairFirst Pro AllPairs P32"
 GPU_TACTICAL_BOT_LIVEROAD = "GPU Tactical Bot LiveRoad Brute Force"
+GPU_TACTICAL_BOT_LIVEROAD_PRO = "GPU Tactical Bot LiveRoad Pro Brute Force"
 GPU_TACTICAL_BOT_HYBRID = "GPU Tactical Bot Hybrid LiveRoad Pair128"
+GPU_TACTICAL_BOT_HYBRID_PRO = "GPU Tactical Bot Hybrid Pro LiveRoad Pair128"
 GPU_TACTICAL_BOT_HYBRID32 = "GPU Tactical Bot Hybrid LiveRoad Pair32"
+GPU_TACTICAL_BOT_HYBRID32_PRO = "GPU Tactical Bot Hybrid Pro LiveRoad Pair32"
+
 # Training/native rollout still only knows the original stateless V1/V2 actors.
-# Pro variants stay benchmark/arena/GUI-only until their scorers are validated.
+# Experimental Pro search variants stay benchmark/arena/GUI-only until validated.
 GPU_TACTICAL_BOTS = (GPU_TACTICAL_BOT, GPU_TACTICAL_BOT_V2)
 
 
@@ -78,13 +86,6 @@ class GPUTacticalBotV2Pro(_BaseGPUTacticalBot):
     label = GPU_TACTICAL_BOT_V2_PRO
 
 
-class GPUTacticalBotV2Pro2(_BaseGPUTacticalBot):
-    """V2Pro plus local partner-aware 2->4/3->5/4->6 pair-force scoring."""
-
-    entrypoint = "tactical_bot_v2_pro2_actions"
-    label = GPU_TACTICAL_BOT_V2_PRO2
-
-
 class _SearchGPUTacticalBot(_BaseGPUTacticalBot):
     """Two-stone planner with the second action cached entirely on the GPU."""
 
@@ -133,71 +134,104 @@ class _SearchGPUTacticalBot(_BaseGPUTacticalBot):
 
 
 class GPUTacticalBotV3(_SearchGPUTacticalBot):
-    """V3: TOP16 current cells -> all C(16,2)=120 pairs -> no reply search."""
-
     entrypoint = "tactical_bot_v3_actions"
     label = GPU_TACTICAL_BOT_V3
 
 
-class GPUTacticalBotSmall(_SearchGPUTacticalBot):
-    """Historical control: V3-style search with TOP12 -> C(12,2)=66 pairs."""
+class GPUTacticalBotV3Pro(_SearchGPUTacticalBot):
+    """V3 unchanged search, V2Pro TOP16 ordering."""
 
+    entrypoint = "tactical_bot_v3_pro_actions"
+    label = GPU_TACTICAL_BOT_V3_PRO
+
+
+class GPUTacticalBotSmall(_SearchGPUTacticalBot):
     entrypoint = "tactical_bot_small_actions"
     label = GPU_TACTICAL_BOT_SMALL
 
 
 class GPUTacticalBotV4(_SearchGPUTacticalBot):
-    """V4: TOP12 own search plus filtered full opponent turns.
-
-    Own side: TOP12 -> 66 pairs -> TOP4 complete pair states.
-    Opponent: V2 TOP6 cells -> all C(6,2)=15 full two-stone replies for each
-    of our TOP4 finalists. Choose our pair by maximin.
-    """
-
     entrypoint = "tactical_bot_v4_actions"
     label = GPU_TACTICAL_BOT_V4
 
 
-class GPUTacticalBotFullPair(_SearchGPUTacticalBot):
-    """Exhaustive reference: every legal unordered two-stone pair C(E,2)."""
+class GPUTacticalBotV4Pro(_SearchGPUTacticalBot):
+    """V4 unchanged search/maximin, V2Pro own TOP12 and opponent TOP6 ordering."""
 
+    entrypoint = "tactical_bot_v4_pro_actions"
+    label = GPU_TACTICAL_BOT_V4_PRO
+
+
+class GPUTacticalBotFullPair(_SearchGPUTacticalBot):
     entrypoint = "tactical_bot_full_pair_actions"
     label = GPU_TACTICAL_BOT_FULL_PAIR
 
 
-class GPUTacticalBotPairFirst(_SearchGPUTacticalBot):
-    """Pair-native prefilter: cheap-score every legal pair, exact-evaluate TOP128."""
+class GPUTacticalBotFullPairPro(_SearchGPUTacticalBot):
+    """Full exhaustive control; V2Pro only for single move and equal-value tie prior."""
 
+    entrypoint = "tactical_bot_full_pair_pro_actions"
+    label = GPU_TACTICAL_BOT_FULL_PAIR_PRO
+
+
+class GPUTacticalBotPairFirst(_SearchGPUTacticalBot):
     entrypoint = "tactical_bot_pairfirst_actions"
     label = GPU_TACTICAL_BOT_PAIRFIRST
 
 
-class GPUTacticalBotPairFirst32(_SearchGPUTacticalBot):
-    """Controlled PairFirst variant: same all-pair cheap scorer, TOP32 exact."""
+class GPUTacticalBotPairFirstPro(_SearchGPUTacticalBot):
+    """Same P128 search; V2Pro endpoint prior added to cheap pair ordering."""
 
+    entrypoint = "tactical_bot_pairfirst_pro_actions"
+    label = GPU_TACTICAL_BOT_PAIRFIRST_PRO
+
+
+class GPUTacticalBotPairFirst32(_SearchGPUTacticalBot):
     entrypoint = "tactical_bot_pairfirst32_actions"
     label = GPU_TACTICAL_BOT_PAIRFIRST32
 
 
-class GPUTacticalBotLiveRoad(_SearchGPUTacticalBot):
-    """Exact brute force over an adaptive pool of structurally live-road cells."""
+class GPUTacticalBotPairFirst32Pro(_SearchGPUTacticalBot):
+    """Same P32 search; V2Pro endpoint prior added to cheap pair ordering."""
 
+    entrypoint = "tactical_bot_pairfirst32_pro_actions"
+    label = GPU_TACTICAL_BOT_PAIRFIRST32_PRO
+
+
+class GPUTacticalBotLiveRoad(_SearchGPUTacticalBot):
     entrypoint = "tactical_bot_liveroad_actions"
     label = GPU_TACTICAL_BOT_LIVEROAD
 
 
-class GPUTacticalBotHybrid(_SearchGPUTacticalBot):
-    """Pure hybrid: LiveRoad pool -> pair-aware cheap score -> global TOP128 exact."""
+class GPUTacticalBotLiveRoadPro(_SearchGPUTacticalBot):
+    """Same LiveRoad pool/brute force; V2Pro sparse floor and tie ordering."""
 
+    entrypoint = "tactical_bot_liveroad_pro_actions"
+    label = GPU_TACTICAL_BOT_LIVEROAD_PRO
+
+
+class GPUTacticalBotHybrid(_SearchGPUTacticalBot):
     entrypoint = "tactical_bot_hybrid_actions"
     label = GPU_TACTICAL_BOT_HYBRID
 
 
-class GPUTacticalBotHybrid32(_SearchGPUTacticalBot):
-    """Controlled Hybrid variant: same pool/cheap score, TOP32 exact finalists."""
+class GPUTacticalBotHybridPro(_SearchGPUTacticalBot):
+    """Same H128 LiveRoad pool/TOP128; V2Pro endpoint prior in pair ordering."""
 
+    entrypoint = "tactical_bot_hybrid_pro_actions"
+    label = GPU_TACTICAL_BOT_HYBRID_PRO
+
+
+class GPUTacticalBotHybrid32(_SearchGPUTacticalBot):
     entrypoint = "tactical_bot_hybrid32_actions"
     label = GPU_TACTICAL_BOT_HYBRID32
+
+
+class GPUTacticalBotHybrid32Pro(_SearchGPUTacticalBot):
+    """Same H32 LiveRoad pool/TOP32; V2Pro endpoint prior in pair ordering."""
+
+    entrypoint = "tactical_bot_hybrid32_pro_actions"
+    label = GPU_TACTICAL_BOT_HYBRID32_PRO
 
 
 # Compatibility name used by older arena modules.
@@ -207,9 +241,7 @@ GPUTacticalBotV4B8x2 = GPUTacticalBotV4
 class GPUTacticalBotV5B8x4(GPUTacticalBotV3):
     def __init__(self, *args, **kwargs):
         raise RuntimeError(
-            "GPU Tactical Bot V5 D3 B8x4 was removed. Use GPUTacticalBotV3, "
-            "GPUTacticalBotV4, a PairFirst variant, GPUTacticalBotLiveRoad "
-            "or a GPUTacticalBotHybrid variant."
+            "GPU Tactical Bot V5 D3 B8x4 was removed. Use a current search bot."
         )
 
 
@@ -219,30 +251,29 @@ def create_gpu_tactical_bot(
     *,
     verbose_build: bool = False,
 ) -> _BaseGPUTacticalBot:
-    if label == GPU_TACTICAL_BOT:
-        return GPUTacticalBot(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_V2:
-        return GPUTacticalBotV2(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_V2_PRO:
-        return GPUTacticalBotV2Pro(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_V2_PRO2:
-        return GPUTacticalBotV2Pro2(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_V3:
-        return GPUTacticalBotV3(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_SMALL:
-        return GPUTacticalBotSmall(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_V4:
-        return GPUTacticalBotV4(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_FULL_PAIR:
-        return GPUTacticalBotFullPair(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_PAIRFIRST:
-        return GPUTacticalBotPairFirst(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_PAIRFIRST32:
-        return GPUTacticalBotPairFirst32(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_LIVEROAD:
-        return GPUTacticalBotLiveRoad(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_HYBRID:
-        return GPUTacticalBotHybrid(device, verbose_build=verbose_build)
-    if label == GPU_TACTICAL_BOT_HYBRID32:
-        return GPUTacticalBotHybrid32(device, verbose_build=verbose_build)
-    raise ValueError(f"Unknown GPU tactical bot: {label}")
+    by_label = {
+        GPU_TACTICAL_BOT: GPUTacticalBot,
+        GPU_TACTICAL_BOT_V2: GPUTacticalBotV2,
+        GPU_TACTICAL_BOT_V2_PRO: GPUTacticalBotV2Pro,
+        GPU_TACTICAL_BOT_V3: GPUTacticalBotV3,
+        GPU_TACTICAL_BOT_V3_PRO: GPUTacticalBotV3Pro,
+        GPU_TACTICAL_BOT_SMALL: GPUTacticalBotSmall,
+        GPU_TACTICAL_BOT_V4: GPUTacticalBotV4,
+        GPU_TACTICAL_BOT_V4_PRO: GPUTacticalBotV4Pro,
+        GPU_TACTICAL_BOT_FULL_PAIR: GPUTacticalBotFullPair,
+        GPU_TACTICAL_BOT_FULL_PAIR_PRO: GPUTacticalBotFullPairPro,
+        GPU_TACTICAL_BOT_PAIRFIRST: GPUTacticalBotPairFirst,
+        GPU_TACTICAL_BOT_PAIRFIRST_PRO: GPUTacticalBotPairFirstPro,
+        GPU_TACTICAL_BOT_PAIRFIRST32: GPUTacticalBotPairFirst32,
+        GPU_TACTICAL_BOT_PAIRFIRST32_PRO: GPUTacticalBotPairFirst32Pro,
+        GPU_TACTICAL_BOT_LIVEROAD: GPUTacticalBotLiveRoad,
+        GPU_TACTICAL_BOT_LIVEROAD_PRO: GPUTacticalBotLiveRoadPro,
+        GPU_TACTICAL_BOT_HYBRID: GPUTacticalBotHybrid,
+        GPU_TACTICAL_BOT_HYBRID_PRO: GPUTacticalBotHybridPro,
+        GPU_TACTICAL_BOT_HYBRID32: GPUTacticalBotHybrid32,
+        GPU_TACTICAL_BOT_HYBRID32_PRO: GPUTacticalBotHybrid32Pro,
+    }
+    cls = by_label.get(label)
+    if cls is None:
+        raise ValueError(f"Unknown GPU tactical bot: {label}")
+    return cls(device, verbose_build=verbose_build)
