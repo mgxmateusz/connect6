@@ -15,6 +15,7 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV2Pro,
+    GPUTacticalBotV2Pro2,
     GPUTacticalBotV3,
     GPUTacticalBotV4,
     GPUTacticalBotPairFirst,
@@ -39,6 +40,7 @@ BOT_SPECS = (
     ("v1", "GPU Tactical Bot V1", GPUTacticalBot),
     ("v2", "GPU Tactical Bot V2", GPUTacticalBotV2),
     ("v2pro", "GPU Tactical Bot V2 Pro LatentFork", GPUTacticalBotV2Pro),
+    ("v2pro2", "GPU Tactical Bot V2 Pro2 PairForce", GPUTacticalBotV2Pro2),
     ("v3", "GPU Tactical Bot V3 Top16 Pair-State", GPUTacticalBotV3),
     ("v4", "GPU Tactical Bot V4 Top12 ReplyPair6", GPUTacticalBotV4),
     ("pair", "GPU Tactical Bot PairFirst AllPairs P128", GPUTacticalBotPairFirst),
@@ -249,8 +251,6 @@ def main() -> None:
     print(f"Opening: action={CENTER}, row={CENTER_ROW}, col={CENTER_COL}")
     print(f"Output: {output}")
 
-    # Only the newest model is needed. NativePolicyPool still uses the same
-    # FP16/WMMA inference path as the fast arena, but packs a single checkpoint.
     pool = NativePolicyPool([latest], device, load_chunk=1)
 
     payload = {
@@ -266,13 +266,10 @@ def main() -> None:
         "bots": [key for key, _, _ in BOT_SPECS],
         "games": [],
     }
-    # Always start a fresh diagnostic file. One invocation must contain exactly
-    # two games per listed bot and no stale games from an older CNN checkpoint.
     _write_output(output, payload)
 
     for bot_index, (bot_key, bot_label, bot_cls) in enumerate(BOT_SPECS, start=1):
         bot = bot_cls(device)
-        # First bot invocation builds/loads the shared native tactical extension.
         print(f"\n[{bot_index}/{len(BOT_SPECS)}] {bot_key.upper()} — {bot_label}")
         for cnn_is_black in (True, False):
             game = _play_one(
