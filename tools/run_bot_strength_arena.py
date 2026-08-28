@@ -10,22 +10,14 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV2Pro,
-    GPUTacticalBotV3,
     GPUTacticalBotV3Pro,
-    GPUTacticalBotV4,
     GPUTacticalBotV4Pro,
     GPUTacticalBotFullPair,
-    GPUTacticalBotFullPairPro,
     GPUTacticalBotPairFirst,
-    GPUTacticalBotPairFirstPro,
     GPUTacticalBotPairFirst32,
-    GPUTacticalBotPairFirst32Pro,
     GPUTacticalBotLiveRoad,
-    GPUTacticalBotLiveRoadPro,
     GPUTacticalBotHybrid,
-    GPUTacticalBotHybridPro,
     GPUTacticalBotHybrid32,
-    GPUTacticalBotHybrid32Pro,
 )
 from connect6.championship import bot_arena as _model_arena
 from connect6.championship import championship as _legacy
@@ -44,28 +36,20 @@ def _discover_even_checkpoints(directory):
 _legacy.discover_checkpoints = _discover_even_checkpoints
 
 
-# Resumable A/B arena. Baselines keep their old signatures/results; every Pro
-# twin gets a new key/signature so only missing Pro CNN/H2H/Cloudict work is run.
+# Validated active set. Old CSVs remain resumable on disk, but removed bot keys
+# are no longer scheduled. V3/V4 baselines are replaced by their V2Pro-order twins.
 _base.BOT_SPECS = (
     _model_arena.BotSpec("v1", "GPU Tactical Bot V1", "gpu_tactical_bot_heuristic_v1", GPUTacticalBot),
     _model_arena.BotSpec("v2", "GPU Tactical Bot V2", "gpu_tactical_bot_heuristic_v2", GPUTacticalBotV2),
     _model_arena.BotSpec("v2pro", "GPU Tactical Bot V2 Pro LatentFork", "gpu_tactical_bot_v2pro_latentfork_v1", GPUTacticalBotV2Pro),
-    _model_arena.BotSpec("v3", "GPU Tactical Bot V3 Top16 Pair-State", "gpu_tactical_bot_v3_top16_pair_state_v1", GPUTacticalBotV3),
     _model_arena.BotSpec("v3pro", "GPU Tactical Bot V3 Pro Top16 Pair-State", "gpu_tactical_bot_v3pro_top16_v2pro_order_v1", GPUTacticalBotV3Pro),
-    _model_arena.BotSpec("v4", "GPU Tactical Bot V4 Top12 ReplyPair6", "gpu_tactical_bot_v4_top12_pair_top4_v2reply6_pairs_v1", GPUTacticalBotV4),
     _model_arena.BotSpec("v4pro", "GPU Tactical Bot V4 Pro Top12 ReplyPair6", "gpu_tactical_bot_v4pro_top12_reply6_v2pro_order_v1", GPUTacticalBotV4Pro),
     _model_arena.BotSpec("pair", "GPU Tactical Bot PairFirst AllPairs P128", "gpu_tactical_bot_pairfirst_allpairs_p128_v1", GPUTacticalBotPairFirst),
-    _model_arena.BotSpec("pairpro", "GPU Tactical Bot PairFirst Pro AllPairs P128", "gpu_tactical_bot_pairfirst_pro_allpairs_p128_v2pro_prior_v1", GPUTacticalBotPairFirstPro),
     _model_arena.BotSpec("pair32", "GPU Tactical Bot PairFirst AllPairs P32", "gpu_tactical_bot_pairfirst_allpairs_p32_v1", GPUTacticalBotPairFirst32),
-    _model_arena.BotSpec("pair32pro", "GPU Tactical Bot PairFirst Pro AllPairs P32", "gpu_tactical_bot_pairfirst_pro_allpairs_p32_v2pro_prior_v1", GPUTacticalBotPairFirst32Pro),
     _model_arena.BotSpec("hybrid", "GPU Tactical Bot Hybrid LiveRoad Pair128", "gpu_tactical_bot_hybrid_liveroad_pair128_v1", GPUTacticalBotHybrid),
-    _model_arena.BotSpec("hybridpro", "GPU Tactical Bot Hybrid Pro LiveRoad Pair128", "gpu_tactical_bot_hybrid_pro_liveroad_p128_v2pro_prior_v1", GPUTacticalBotHybridPro),
     _model_arena.BotSpec("hybrid32", "GPU Tactical Bot Hybrid LiveRoad Pair32", "gpu_tactical_bot_hybrid_liveroad_pair32_v1", GPUTacticalBotHybrid32),
-    _model_arena.BotSpec("hybrid32pro", "GPU Tactical Bot Hybrid Pro LiveRoad Pair32", "gpu_tactical_bot_hybrid_pro_liveroad_p32_v2pro_prior_v1", GPUTacticalBotHybrid32Pro),
     _model_arena.BotSpec("live", "GPU Tactical Bot LiveRoad Brute Force", "gpu_tactical_bot_liveroad_ge2_min16_bruteforce_v1", GPUTacticalBotLiveRoad),
-    _model_arena.BotSpec("livepro", "GPU Tactical Bot LiveRoad Pro Brute Force", "gpu_tactical_bot_liveroad_pro_ge2_min16_v2pro_v1", GPUTacticalBotLiveRoadPro),
     _model_arena.BotSpec("full", "GPU Tactical Bot Full Pair Brute Force", "gpu_tactical_bot_full_pair_bruteforce_v1", GPUTacticalBotFullPair),
-    _model_arena.BotSpec("fullpro", "GPU Tactical Bot Full Pair Pro Brute Force", "gpu_tactical_bot_full_pair_pro_bruteforce_v2pro_tiebreak_v1", GPUTacticalBotFullPairPro),
 )
 _base.BOT_BY_KEY = {spec.key: spec for spec in _base.BOT_SPECS}
 
