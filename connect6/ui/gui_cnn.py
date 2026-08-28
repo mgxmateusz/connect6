@@ -7,12 +7,33 @@ import tkinter as tk
 import torch
 
 from .gpu_bot import (
-    GPU_TACTICAL_BOTS,
+    GPU_TACTICAL_BOT,
+    GPU_TACTICAL_BOT_V2,
+    GPU_TACTICAL_BOT_V3,
+    GPU_TACTICAL_BOT_V4,
+    GPU_TACTICAL_BOT_FULL_PAIR,
+    GPU_TACTICAL_BOT_PAIRFIRST,
+    GPU_TACTICAL_BOT_LIVEROAD,
+    GPU_TACTICAL_BOT_HYBRID,
+    GPU_TACTICAL_BOT_HYBRID32,
     create_gpu_tactical_bot,
 )
 from .gui import HUMAN, Connect6GUI
 from .model import mask_logits
 from .vector_env import canonical_network_input
+
+
+GUI_TACTICAL_BOTS = (
+    GPU_TACTICAL_BOT,
+    GPU_TACTICAL_BOT_V2,
+    GPU_TACTICAL_BOT_V3,
+    GPU_TACTICAL_BOT_V4,
+    GPU_TACTICAL_BOT_PAIRFIRST,
+    GPU_TACTICAL_BOT_HYBRID,
+    GPU_TACTICAL_BOT_HYBRID32,
+    GPU_TACTICAL_BOT_LIVEROAD,
+    GPU_TACTICAL_BOT_FULL_PAIR,
+)
 
 
 class Connect6CNNGUI(Connect6GUI):
@@ -24,8 +45,8 @@ class Connect6CNNGUI(Connect6GUI):
         super().__init__(root, runs_dir)
 
     def refresh_models(self) -> None:
-        # Preserve bot selections because the base implementation knows only
-        # Human + checkpoint entries and would otherwise reset them to Human.
+        # Preserve tactical-bot selections because the base implementation knows
+        # only Human + checkpoint entries and would otherwise reset them to Human.
         black_before = self.black_source.get()
         white_before = self.white_source.get()
         super().refresh_models()
@@ -33,26 +54,26 @@ class Connect6CNNGUI(Connect6GUI):
         values = list(self.black_combo["values"])
         if self.device.type == "cuda":
             insert_at = 1
-            for label in GPU_TACTICAL_BOTS:
+            for label in GUI_TACTICAL_BOTS:
                 if label not in values:
                     values.insert(insert_at, label)
                     insert_at += 1
         self.black_combo["values"] = values
         self.white_combo["values"] = values
 
-        if black_before in GPU_TACTICAL_BOTS and black_before in values:
+        if black_before in GUI_TACTICAL_BOTS and black_before in values:
             self.black_source.set(black_before)
-        if white_before in GPU_TACTICAL_BOTS and white_before in values:
+        if white_before in GUI_TACTICAL_BOTS and white_before in values:
             self.white_source.set(white_before)
 
     def _bot_selected(self) -> bool:
         return any(
-            source in GPU_TACTICAL_BOTS
+            source in GUI_TACTICAL_BOTS
             for source in (self.black_source.get(), self.white_source.get())
         )
 
     def _bots_ready(self) -> bool:
-        return all(label in self._tactical_bots for label in GPU_TACTICAL_BOTS)
+        return all(label in self._tactical_bots for label in GUI_TACTICAL_BOTS)
 
     def _start_tactical_bot_loading(self) -> None:
         if self.device.type != "cuda":
@@ -64,22 +85,24 @@ class Connect6CNNGUI(Connect6GUI):
         self._bot_loading = True
         self._bot_load_error = None
         self.status.set(
-            "Compiling/loading GPU Tactical Bot V1 + V2 in background... "
+            "Compiling/loading GPU Tactical Bots in background... "
             "first run can take a minute; GUI remains usable."
         )
 
         def worker() -> None:
             try:
-                # Both versions live in one native extension. Force the build
-                # once, then create two lightweight wrappers over that cache.
+                # All tactical bots share one native extension. Force the build
+                # once, then create lightweight wrappers for every active bot.
+                first_label = GUI_TACTICAL_BOTS[0]
                 first = create_gpu_tactical_bot(
-                    GPU_TACTICAL_BOTS[0], self.device, verbose_build=True
+                    first_label, self.device, verbose_build=True
                 )
                 first._ext()
-                self._tactical_bots[GPU_TACTICAL_BOTS[0]] = first
-                self._tactical_bots[GPU_TACTICAL_BOTS[1]] = create_gpu_tactical_bot(
-                    GPU_TACTICAL_BOTS[1], self.device
-                )
+                self._tactical_bots[first_label] = first
+                for label in GUI_TACTICAL_BOTS[1:]:
+                    self._tactical_bots[label] = create_gpu_tactical_bot(
+                        label, self.device
+                    )
             except BaseException as exc:  # propagate to Tk thread via polling
                 self._bot_load_error = exc
             finally:
@@ -108,7 +131,7 @@ class Connect6CNNGUI(Connect6GUI):
             return
 
         if self._bots_ready():
-            self.status.set("GPU Tactical Bot V1 + V2 ready")
+            self.status.set(f"GPU Tactical Bots ready: {len(GUI_TACTICAL_BOTS)}")
             self._schedule_ai_if_needed()
 
     def _get_tactical_bot(self, source: str):
@@ -143,7 +166,7 @@ class Connect6CNNGUI(Connect6GUI):
 
     @torch.inference_mode()
     def _ai_action(self, source: str) -> int:
-        if source in GPU_TACTICAL_BOTS:
+        if source in GUI_TACTICAL_BOTS:
             return self._bot_action(source)
 
         model, _ = self._get_model(source)
@@ -187,7 +210,7 @@ class Connect6CNNGUI(Connect6GUI):
         if self.paused or self.game.done or self.current_source() == HUMAN:
             return
 
-        if self.current_source() in GPU_TACTICAL_BOTS and not self._bots_ready():
+        if self.current_source() in GUI_TACTICAL_BOTS and not self._bots_ready():
             self._start_tactical_bot_loading()
             return
 
@@ -196,7 +219,17 @@ class Connect6CNNGUI(Connect6GUI):
             self._do_ai_step,
         )
 
+    def _reset_loaded_tactical_bots(self) -> None:
+        # Search bots cache the second stone of a planned pair. Clear that cache
+        # before every fresh GUI game so an interrupted old game cannot leak a
+        # pending action into the next one.
+        for bot in self._tactical_bots.values():
+            reset = getattr(bot, "reset", None)
+            if callable(reset):
+                reset()
+
     def new_game(self) -> None:
+        self._reset_loaded_tactical_bots()
         super().new_game()
         # If either bot is selected for either side, compile the shared native
         # extension immediately in the background.
@@ -206,7 +239,7 @@ class Connect6CNNGUI(Connect6GUI):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Connect6 GUI: human/model/GPU Tactical Bot V1/V2 matches"
+        description="Connect6 GUI: human/checkpoint/all active GPU tactical bots"
     )
     parser.add_argument("--runs-dir", default="runs")
     args = parser.parse_args()
