@@ -38,7 +38,7 @@ def load_native_bot_extension(*, verbose: bool = False):
 
     root = Path(__file__).resolve().parent
     sources = [
-        str(root / "native_bot_v18.cpp"),
+        str(root / "native_bot_v19.cpp"),
         str(root / "native_bot_kernel.cu"),
         str(root / "native_bot_v3_kernel.cu"),
         str(root / "native_bot_small_kernel.cu"),
@@ -46,14 +46,13 @@ def load_native_bot_extension(*, verbose: bool = False):
         str(root / "native_bot_full_pair_kernel.cu"),
         str(root / "native_bot_pairfirst_kernel.cu"),
         str(root / "native_bot_liveroad_kernel.cu"),
-        # This translation unit includes the existing Pair128 kernel and adds
-        # otherwise-identical Pair96 and Pair64 specializations.
-        str(root / "native_bot_hybrid_liveroad_pair_variants_kernel.cu"),
+        # One translation unit includes Pair128/96/64 and adds Pair32.
+        str(root / "native_bot_hybrid_liveroad_pair_variants32_kernel.cu"),
     ]
 
-    # v18 keeps Hybrid128 unchanged and adds controlled TOP96/TOP64 exact-stage
-    # variants over the same pure LiveRoad pool and same cheap pair score.
-    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v18"
+    # v19 keeps Hybrid128/96/64 unchanged and adds controlled TOP32 exact-stage
+    # over the same pure LiveRoad pool and the same cheap pair score.
+    extension_name = f"connect6_cuda_tactical_bot_sm{arch_digits}_v19"
     local_app_data = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
     build_directory = local_app_data / "connect6_native_build" / extension_name
     build_directory.mkdir(parents=True, exist_ok=True)
@@ -73,7 +72,7 @@ def load_native_bot_extension(*, verbose: bool = False):
     print(
         "[BOT BUILD] First use compiles V1/V2 + V3 TOP16 + Small TOP12 + "
         "V4 ReplyPair6 + Full Pair + PairFirst P128 + LiveRoad + "
-        "Hybrid LiveRoad->Pair128/96/64 CUDA kernels; later runs use the cache.",
+        "Hybrid LiveRoad->Pair128/96/64/32 CUDA kernels; later runs use the cache.",
         flush=True,
     )
 
