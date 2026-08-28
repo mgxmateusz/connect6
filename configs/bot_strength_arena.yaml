@@ -4,30 +4,19 @@ bot_strength_arena:
   device: "cuda"
 
   # CNN gauntlet is filtered by tools/run_bot_strength_arena.py to even updates
-  # only: model_update_2, 4, 6, ... . Existing baseline results are resumed in-place.
+  # only: model_update_2, 4, 6, ... . Existing results are resumed in-place.
   #
-  # V2Pro is the validated one-cell latent-fork/road-leverage scorer.
-  # Every "*pro" search bot below keeps the corresponding baseline search depth,
-  # exact evaluator, candidate budget and (where applicable) structural pool.
-  # Only the V2 ordering/prior is replaced by V2Pro:
-  # - V3Pro: V2Pro TOP16 cells.
-  # - V4Pro: V2Pro own TOP12 and opponent TOP6 reply cells.
-  # - PairPro: same all-legal-pair cheap scorer + V2Pro endpoint prior, same K.
-  # - HybridPro: same pure LiveRoad pool + same cheap scorer + endpoint prior, same K.
-  # - LivePro: same LiveRoad brute pool; V2Pro sparse TOP16 floor/tie ordering.
-  # - FullPro: same exhaustive pair search; V2Pro only tie/single-stone ordering.
-  #
-  # V2Pro2 is no longer active. Its historical CSV/source can remain for comparison.
+  # Validated active set after the V2Pro scorer A/B experiment:
+  # - keep V1, V2 and V2Pro;
+  # - replace baseline V3/V4 with V3Pro/V4Pro;
+  # - keep original Pair/Hybrid/Live/Full families;
+  # - remove failed PairPro/Pair32Pro/HybridPro/Hybrid32Pro/LivePro/FullPro twins.
   bots: [
     "v1", "v2", "v2pro",
-    "v3", "v3pro",
-    "v4", "v4pro",
-    "pair", "pairpro",
-    "pair32", "pair32pro",
-    "hybrid", "hybridpro",
-    "hybrid32", "hybrid32pro",
-    "live", "livepro",
-    "full", "fullpro"
+    "v3pro", "v4pro",
+    "pair", "pair32",
+    "hybrid", "hybrid32",
+    "live", "full"
   ]
 
   models_per_batch: 512
