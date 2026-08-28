@@ -9,22 +9,14 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV2Pro,
-    GPUTacticalBotV3,
     GPUTacticalBotV3Pro,
-    GPUTacticalBotV4,
     GPUTacticalBotV4Pro,
     GPUTacticalBotFullPair,
-    GPUTacticalBotFullPairPro,
     GPUTacticalBotPairFirst,
-    GPUTacticalBotPairFirstPro,
     GPUTacticalBotPairFirst32,
-    GPUTacticalBotPairFirst32Pro,
     GPUTacticalBotLiveRoad,
-    GPUTacticalBotLiveRoadPro,
     GPUTacticalBotHybrid,
-    GPUTacticalBotHybridPro,
     GPUTacticalBotHybrid32,
-    GPUTacticalBotHybrid32Pro,
 )
 from connect6.engine.checkpoint import load_model_for_inference
 from connect6.engine.model import mask_logits
@@ -160,22 +152,14 @@ def main() -> None:
     bot_v1 = GPUTacticalBot(device)
     bot_v2 = GPUTacticalBotV2(device)
     bot_v2pro = GPUTacticalBotV2Pro(device)
-    bot_v3 = GPUTacticalBotV3(device)
     bot_v3pro = GPUTacticalBotV3Pro(device)
-    bot_v4 = GPUTacticalBotV4(device)
     bot_v4pro = GPUTacticalBotV4Pro(device)
     bot_p128 = GPUTacticalBotPairFirst(device)
-    bot_p128pro = GPUTacticalBotPairFirstPro(device)
     bot_p32 = GPUTacticalBotPairFirst32(device)
-    bot_p32pro = GPUTacticalBotPairFirst32Pro(device)
     bot_h128 = GPUTacticalBotHybrid(device)
-    bot_h128pro = GPUTacticalBotHybridPro(device)
     bot_h32 = GPUTacticalBotHybrid32(device)
-    bot_h32pro = GPUTacticalBotHybrid32Pro(device)
     bot_live = GPUTacticalBotLiveRoad(device)
-    bot_livepro = GPUTacticalBotLiveRoadPro(device)
     bot_full = GPUTacticalBotFullPair(device)
-    bot_fullpro = GPUTacticalBotFullPairPro(device)
 
     tr_cfg = payload.get("config", {}).get("training", {})
     amp_enabled = bool(tr_cfg.get("amp", True))
@@ -189,10 +173,8 @@ def main() -> None:
     for bot in (bot_v1, bot_v2, bot_v2pro):
         bot.actions(seed_board, seed_player, seed_left_one)
     search_bots = (
-        bot_v3, bot_v3pro, bot_v4, bot_v4pro,
-        bot_p128, bot_p128pro, bot_p32, bot_p32pro,
-        bot_h128, bot_h128pro, bot_h32, bot_h32pro,
-        bot_live, bot_livepro, bot_full, bot_fullpro,
+        bot_v3pro, bot_v4pro, bot_p128, bot_p32,
+        bot_h128, bot_h32, bot_live, bot_full,
     )
     for bot in search_bots:
         bot.reset()
@@ -202,18 +184,15 @@ def main() -> None:
 
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"Checkpoint: {checkpoint}")
-    print("Pro twins keep each baseline search/evaluator/pool unchanged and replace only V2 ordering/prior with V2Pro.")
-    print("Pair/Hybrid Pro add V2Pro(first)+V2Pro(second) at scale 1 to the existing cheap pair score.")
+    print("Active set: V1, V2, V2Pro, V3Pro, V4Pro, P128, P32, H128, H32, LiveRoad, Full.")
     print()
     print(
         f"{'batch':>6} | {'stones':>11} | {'CNN':>8} | {'V1':>7} | {'V2':>7} | {'V2Pro':>7} | "
-        f"{'V3':>8} | {'V3Pro':>8} | {'V4':>8} | {'V4Pro':>8} | "
-        f"{'P128':>8} | {'P128Pro':>8} | {'P32':>8} | {'P32Pro':>8} | "
-        f"{'H128':>8} | {'H128Pro':>8} | {'H32':>8} | {'H32Pro':>8} | "
-        f"{'Live':>9} | {'LivePro':>9} | {'Full':>9} | {'FullPro':>9} | "
-        f"{'V3P/V3':>7} | {'V4P/V4':>7} | {'P32P/P32':>8} | {'H32P/H32':>8}"
+        f"{'V3Pro':>8} | {'V4Pro':>8} | {'P128':>8} | {'P32':>8} | "
+        f"{'H128':>8} | {'H32':>8} | {'Live':>9} | {'Full':>9} | "
+        f"{'V3P/CNN':>8} | {'V4P/CNN':>8} | {'P32/CNN':>8} | {'H32/CNN':>8}"
     )
-    print("-" * 240)
+    print("-" * 175)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left, stone_counts = _make_legal_positions(
@@ -239,22 +218,20 @@ def main() -> None:
         def heavy(bot):
             return _elapsed_search_avg_decision_ms(bot, boards, players, warmup=args.heavy_warmup, iterations=args.heavy_iters)
 
-        v3_ms, v3p_ms = normal(bot_v3), normal(bot_v3pro)
-        v4_ms, v4p_ms = normal(bot_v4), normal(bot_v4pro)
-        p128_ms, p128p_ms = normal(bot_p128), normal(bot_p128pro)
-        p32_ms, p32p_ms = normal(bot_p32), normal(bot_p32pro)
-        h128_ms, h128p_ms = normal(bot_h128), normal(bot_h128pro)
-        h32_ms, h32p_ms = normal(bot_h32), normal(bot_h32pro)
-        live_ms, livep_ms = heavy(bot_live), heavy(bot_livepro)
-        full_ms, fullp_ms = heavy(bot_full), heavy(bot_fullpro)
+        v3p_ms = normal(bot_v3pro)
+        v4p_ms = normal(bot_v4pro)
+        p128_ms = normal(bot_p128)
+        p32_ms = normal(bot_p32)
+        h128_ms = normal(bot_h128)
+        h32_ms = normal(bot_h32)
+        live_ms = heavy(bot_live)
+        full_ms = heavy(bot_full)
 
         print(
             f"{batch:6d} | {stone_label:>11} | {model_ms:8.4f} | {v1_ms:7.4f} | {v2_ms:7.4f} | {v2pro_ms:7.4f} | "
-            f"{v3_ms:8.4f} | {v3p_ms:8.4f} | {v4_ms:8.4f} | {v4p_ms:8.4f} | "
-            f"{p128_ms:8.4f} | {p128p_ms:8.4f} | {p32_ms:8.4f} | {p32p_ms:8.4f} | "
-            f"{h128_ms:8.4f} | {h128p_ms:8.4f} | {h32_ms:8.4f} | {h32p_ms:8.4f} | "
-            f"{live_ms:9.4f} | {livep_ms:9.4f} | {full_ms:9.4f} | {fullp_ms:9.4f} | "
-            f"{v3p_ms/v3_ms:7.3f} | {v4p_ms/v4_ms:7.3f} | {p32p_ms/p32_ms:8.3f} | {h32p_ms/h32_ms:8.3f}"
+            f"{v3p_ms:8.4f} | {v4p_ms:8.4f} | {p128_ms:8.4f} | {p32_ms:8.4f} | "
+            f"{h128_ms:8.4f} | {h32_ms:8.4f} | {live_ms:9.4f} | {full_ms:9.4f} | "
+            f"{v3p_ms/model_ms:8.3f} | {v4p_ms/model_ms:8.3f} | {p32_ms/model_ms:8.3f} | {h32_ms/model_ms:8.3f}"
         )
 
 
