@@ -5,14 +5,16 @@ bot_strength_arena:
 
   # CNN gauntlet is filtered by tools/run_bot_strength_arena.py to even updates
   # only: model_update_2, 4, 6, ... . Existing results are resumed in-place.
-  # V2 Pro = same one-cell architecture as V2, but with latent-fork/road-leverage
+  # V2 Pro = same one-cell architecture as V2, with latent-fork/road-leverage
   #          scoring for clean 2->3 and 3->4 structures before immediate threats.
+  # V2 Pro2 = V2 Pro plus local partner-aware pair-force scoring for X+Y
+  #           transitions 2->4 / 3->5 / 4->6 on shared six-cell roads.
   # Pair128/Pair32 = every legal pair gets the same cheap pair-aware score;
   #                  only exact finalist budget changes: 128 vs 32.
   # Hybrid128/Hybrid32 = same pure LiveRoad pool and same cheap pair-aware score;
   #                      only exact finalist budget changes: 128 vs 32.
   # Hybrid96/Hybrid64 are no longer active participants; historical rows remain.
-  bots: ["v1", "v2", "v2pro", "v3", "v4", "pair", "pair32", "hybrid", "hybrid32", "live", "full"]
+  bots: ["v1", "v2", "v2pro", "v2pro2", "v3", "v4", "pair", "pair32", "hybrid", "hybrid32", "live", "full"]
 
   models_per_batch: 512
   native_load_chunk_models: 32
