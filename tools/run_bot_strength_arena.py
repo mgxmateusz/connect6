@@ -15,6 +15,8 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBotPairFirst,
     GPUTacticalBotLiveRoad,
     GPUTacticalBotHybrid,
+    GPUTacticalBotHybrid96,
+    GPUTacticalBotHybrid64,
 )
 from connect6.championship import bot_arena as _model_arena
 from connect6.championship import championship as _legacy
@@ -75,6 +77,18 @@ _base.BOT_SPECS = (
         "GPU Tactical Bot Hybrid LiveRoad Pair128",
         "gpu_tactical_bot_hybrid_liveroad_pair128_v1",
         GPUTacticalBotHybrid,
+    ),
+    _model_arena.BotSpec(
+        "hybrid96",
+        "GPU Tactical Bot Hybrid LiveRoad Pair96",
+        "gpu_tactical_bot_hybrid_liveroad_pair96_v1",
+        GPUTacticalBotHybrid96,
+    ),
+    _model_arena.BotSpec(
+        "hybrid64",
+        "GPU Tactical Bot Hybrid LiveRoad Pair64",
+        "gpu_tactical_bot_hybrid_liveroad_pair64_v1",
+        GPUTacticalBotHybrid64,
     ),
     _model_arena.BotSpec(
         "live",
