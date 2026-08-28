@@ -15,15 +15,22 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBot,
     GPUTacticalBotV2,
     GPUTacticalBotV2Pro,
-    GPUTacticalBotV2Pro2,
     GPUTacticalBotV3,
+    GPUTacticalBotV3Pro,
     GPUTacticalBotV4,
+    GPUTacticalBotV4Pro,
     GPUTacticalBotPairFirst,
+    GPUTacticalBotPairFirstPro,
     GPUTacticalBotPairFirst32,
+    GPUTacticalBotPairFirst32Pro,
     GPUTacticalBotHybrid,
+    GPUTacticalBotHybridPro,
     GPUTacticalBotHybrid32,
+    GPUTacticalBotHybrid32Pro,
     GPUTacticalBotLiveRoad,
+    GPUTacticalBotLiveRoadPro,
     GPUTacticalBotFullPair,
+    GPUTacticalBotFullPairPro,
 )
 from connect6.championship.championship import discover_checkpoints
 from connect6.championship.championship_cnn import _black_to_move, _masked_step
@@ -40,15 +47,22 @@ BOT_SPECS = (
     ("v1", "GPU Tactical Bot V1", GPUTacticalBot),
     ("v2", "GPU Tactical Bot V2", GPUTacticalBotV2),
     ("v2pro", "GPU Tactical Bot V2 Pro LatentFork", GPUTacticalBotV2Pro),
-    ("v2pro2", "GPU Tactical Bot V2 Pro2 PairForce", GPUTacticalBotV2Pro2),
     ("v3", "GPU Tactical Bot V3 Top16 Pair-State", GPUTacticalBotV3),
+    ("v3pro", "GPU Tactical Bot V3 Pro Top16 Pair-State", GPUTacticalBotV3Pro),
     ("v4", "GPU Tactical Bot V4 Top12 ReplyPair6", GPUTacticalBotV4),
+    ("v4pro", "GPU Tactical Bot V4 Pro Top12 ReplyPair6", GPUTacticalBotV4Pro),
     ("pair", "GPU Tactical Bot PairFirst AllPairs P128", GPUTacticalBotPairFirst),
+    ("pairpro", "GPU Tactical Bot PairFirst Pro AllPairs P128", GPUTacticalBotPairFirstPro),
     ("pair32", "GPU Tactical Bot PairFirst AllPairs P32", GPUTacticalBotPairFirst32),
+    ("pair32pro", "GPU Tactical Bot PairFirst Pro AllPairs P32", GPUTacticalBotPairFirst32Pro),
     ("hybrid", "GPU Tactical Bot Hybrid LiveRoad Pair128", GPUTacticalBotHybrid),
+    ("hybridpro", "GPU Tactical Bot Hybrid Pro LiveRoad Pair128", GPUTacticalBotHybridPro),
     ("hybrid32", "GPU Tactical Bot Hybrid LiveRoad Pair32", GPUTacticalBotHybrid32),
+    ("hybrid32pro", "GPU Tactical Bot Hybrid Pro LiveRoad Pair32", GPUTacticalBotHybrid32Pro),
     ("live", "GPU Tactical Bot LiveRoad Brute Force", GPUTacticalBotLiveRoad),
+    ("livepro", "GPU Tactical Bot LiveRoad Pro Brute Force", GPUTacticalBotLiveRoadPro),
     ("full", "GPU Tactical Bot Full Pair Brute Force", GPUTacticalBotFullPair),
+    ("fullpro", "GPU Tactical Bot Full Pair Pro Brute Force", GPUTacticalBotFullPairPro),
 )
 
 
@@ -104,8 +118,6 @@ def _play_one(
     winner_value = 0
     moves: list[dict] = []
 
-    # Diagnostic opening: black's only opening stone is always forced to the
-    # exact center. Neither CNN nor tactical bot is allowed to choose ply 0.
     opening = torch.tensor([CENTER], dtype=torch.long, device=device)
     opening_left = int(env.stones_left[0].item())
     moves.append(
@@ -136,17 +148,10 @@ def _play_one(
 
         if cnn_to_move:
             actions = pool.actions(
-                env.boards,
-                env.current_player,
-                env.stones_left,
-                model_ids,
+                env.boards, env.current_player, env.stones_left, model_ids
             )
         else:
-            actions = bot.actions(
-                env.boards,
-                env.current_player,
-                env.stones_left,
-            )
+            actions = bot.actions(env.boards, env.current_player, env.stones_left)
 
         action = int(actions[0].item())
         if action < 0 or action >= BOARD * BOARD:
@@ -168,7 +173,6 @@ def _play_one(
                 stones_left_before=stones_left_before,
             )
         )
-
         done, winner = _masked_step(env, actions.to(dtype=torch.long), active)
         if bool(done[0].item()):
             winner_value = int(winner[0].item())
@@ -179,20 +183,14 @@ def _play_one(
         raise RuntimeError(f"{bot_key}: partia nie zakończyła się po maksymalnej liczbie pól")
 
     winner_name, winner_color = _winner_name(
-        winner_value,
-        cnn_is_black=cnn_is_black,
-        bot_key=bot_key,
+        winner_value, cnn_is_black=cnn_is_black, bot_key=bot_key
     )
     return {
         "bot": bot_key,
         "bot_label": bot_label,
         "cnn_color": "black" if cnn_is_black else "white",
         "bot_color": "white" if cnn_is_black else "black",
-        "forced_center": {
-            "action": CENTER,
-            "row": CENTER_ROW,
-            "col": CENTER_COL,
-        },
+        "forced_center": {"action": CENTER, "row": CENTER_ROW, "col": CENTER_COL},
         "winner": winner_name,
         "winner_color": winner_color,
         "move_count": len(moves),
@@ -203,28 +201,22 @@ def _play_one(
 
 def _write_output(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Play the newest CNN checkpoint against every active tactical bot: "
-            "exactly two center-opening games per bot, one with CNN black and one white, "
-            "and save every move for later exploit/glitch analysis."
+            "two center-opening games per bot and save every move."
         )
     )
     parser.add_argument(
-        "--checkpoint-dir",
-        type=Path,
+        "--checkpoint-dir", type=Path,
         default=Path("runs/connect6_cnn_05/checkpoints"),
     )
     parser.add_argument(
-        "--output",
-        type=Path,
+        "--output", type=Path,
         default=Path("runs/connect6_cnn_05/latest_cnn_vs_all_bots_traces.json"),
     )
     args = parser.parse_args()
@@ -273,10 +265,7 @@ def main() -> None:
         print(f"\n[{bot_index}/{len(BOT_SPECS)}] {bot_key.upper()} — {bot_label}")
         for cnn_is_black in (True, False):
             game = _play_one(
-                pool,
-                bot,
-                bot_key=bot_key,
-                bot_label=bot_label,
+                pool, bot, bot_key=bot_key, bot_label=bot_label,
                 cnn_is_black=cnn_is_black,
             )
             payload["games"].append(game)
