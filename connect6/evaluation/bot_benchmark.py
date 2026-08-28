@@ -12,6 +12,7 @@ from connect6.bots.gpu_bot import (
     GPUTacticalBotV4,
     GPUTacticalBotFullPair,
     GPUTacticalBotPairFirst,
+    GPUTacticalBotPairFirst32,
     GPUTacticalBotLiveRoad,
     GPUTacticalBotHybrid,
     GPUTacticalBotHybrid32,
@@ -131,18 +132,8 @@ def main() -> None:
     parser.add_argument("--batch-sizes", default="1,32,128,256,512,1024")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=500)
-    parser.add_argument(
-        "--heavy-iters",
-        type=int,
-        default=50,
-        help="Iterations for very expensive LiveRoad/Full timings (mean ms is still comparable).",
-    )
-    parser.add_argument(
-        "--heavy-warmup",
-        type=int,
-        default=1,
-        help="Warmup iterations for very expensive LiveRoad/Full timings.",
-    )
+    parser.add_argument("--heavy-iters", type=int, default=50)
+    parser.add_argument("--heavy-warmup", type=int, default=1)
     parser.add_argument("--min-stones", type=int, default=41)
     parser.add_argument("--max-stones", type=int, default=81)
     parser.add_argument("--position-seed", type=int, default=12345)
@@ -161,7 +152,8 @@ def main() -> None:
     bot_v2 = GPUTacticalBotV2(device)
     bot_v3 = GPUTacticalBotV3(device)
     bot_v4 = GPUTacticalBotV4(device)
-    bot_pair = GPUTacticalBotPairFirst(device)
+    bot_p128 = GPUTacticalBotPairFirst(device)
+    bot_p32 = GPUTacticalBotPairFirst32(device)
     bot_h128 = GPUTacticalBotHybrid(device)
     bot_h32 = GPUTacticalBotHybrid32(device)
     bot_live = GPUTacticalBotLiveRoad(device)
@@ -178,7 +170,7 @@ def main() -> None:
     seed_left_two = torch.full((1,), 2, dtype=torch.int8, device=device)
     bot_v1.actions(seed_board, seed_player, seed_left_one)
     bot_v2.actions(seed_board, seed_player, seed_left_one)
-    for bot in (bot_v3, bot_v4, bot_pair, bot_h128, bot_h32, bot_live, bot_full):
+    for bot in (bot_v3, bot_v4, bot_p128, bot_p32, bot_h128, bot_h32, bot_live, bot_full):
         bot.reset()
         bot.actions(seed_board, seed_player, seed_left_two)
         bot.actions(seed_board, seed_player, seed_left_one)
@@ -186,23 +178,15 @@ def main() -> None:
 
     print(f"GPU: {torch.cuda.get_device_name(device)}")
     print(f"Checkpoint: {checkpoint}")
-    print("V3: TOP16 cells -> C(16,2)=120 exact states, no reply.")
-    print("V4: TOP12 -> 66 own exact -> TOP4 -> opponent TOP6 -> 4*C(6,2)=60 exact replies; total=126.")
-    print("Pair: every legal pair cheap pair-aware score -> TOP128 -> 128 exact states.")
-    print("Hybrid128/32: identical pure LiveRoad pool + cheap pair score; only exact finalist count changes.")
-    print("Live: all pairs from live-road cell pool -> exact state for every retained pair; pool is at least 16 cells.")
-    print("Full: every legal C(E,2) pair -> exact state for every pair.")
-    print(
-        f"Regular timing: warmup={args.warmup}, iters={args.iters}; "
-        f"heavy Live/Full timing: warmup={args.heavy_warmup}, iters={args.heavy_iters}."
-    )
+    print("Pair128/32: every legal pair gets the same cheap pair-aware score; only exact finalist count changes.")
+    print("Hybrid128/32: same pure LiveRoad pool + same cheap pair score; only exact finalist count changes.")
     print()
     print(
         f"{'batch':>6} | {'stones':>11} | {'CNN ms':>9} | {'V1 ms':>8} | {'V2 ms':>8} | "
-        f"{'V3 ms':>9} | {'V4 ms':>9} | {'Pair P128':>10} | {'H128':>9} | {'H32':>9} | "
-        f"{'LiveRoad':>10} | {'Full':>10} | {'H128/CNN':>8} | {'H32/CNN':>8}"
+        f"{'V3 ms':>9} | {'V4 ms':>9} | {'P128':>9} | {'P32':>9} | {'H128':>9} | {'H32':>9} | "
+        f"{'LiveRoad':>10} | {'Full':>10} | {'P32/CNN':>8} | {'H32/CNN':>8}"
     )
-    print("-" * 158)
+    print("-" * 166)
 
     for batch in _parse_batch_sizes(args.batch_sizes):
         boards, players, left, stone_counts = _make_legal_positions(
@@ -222,28 +206,17 @@ def main() -> None:
         v2_ms = _elapsed_ms(lambda: bot_v2.actions(boards, players, left), args.warmup, args.iters)
         v3_ms = _elapsed_search_avg_decision_ms(bot_v3, boards, players, warmup=args.warmup, iterations=args.iters)
         v4_ms = _elapsed_search_avg_decision_ms(bot_v4, boards, players, warmup=args.warmup, iterations=args.iters)
-        pair_ms = _elapsed_search_avg_decision_ms(bot_pair, boards, players, warmup=args.warmup, iterations=args.iters)
+        p128_ms = _elapsed_search_avg_decision_ms(bot_p128, boards, players, warmup=args.warmup, iterations=args.iters)
+        p32_ms = _elapsed_search_avg_decision_ms(bot_p32, boards, players, warmup=args.warmup, iterations=args.iters)
         h128_ms = _elapsed_search_avg_decision_ms(bot_h128, boards, players, warmup=args.warmup, iterations=args.iters)
         h32_ms = _elapsed_search_avg_decision_ms(bot_h32, boards, players, warmup=args.warmup, iterations=args.iters)
-        live_ms = _elapsed_search_avg_decision_ms(
-            bot_live,
-            boards,
-            players,
-            warmup=args.heavy_warmup,
-            iterations=args.heavy_iters,
-        )
-        full_ms = _elapsed_search_avg_decision_ms(
-            bot_full,
-            boards,
-            players,
-            warmup=args.heavy_warmup,
-            iterations=args.heavy_iters,
-        )
+        live_ms = _elapsed_search_avg_decision_ms(bot_live, boards, players, warmup=args.heavy_warmup, iterations=args.heavy_iters)
+        full_ms = _elapsed_search_avg_decision_ms(bot_full, boards, players, warmup=args.heavy_warmup, iterations=args.heavy_iters)
 
         print(
             f"{batch:6d} | {stone_label:>11} | {model_ms:9.4f} | {v1_ms:8.4f} | {v2_ms:8.4f} | "
-            f"{v3_ms:9.4f} | {v4_ms:9.4f} | {pair_ms:10.4f} | {h128_ms:9.4f} | {h32_ms:9.4f} | "
-            f"{live_ms:10.4f} | {full_ms:10.4f} | {h128_ms/model_ms:8.3f} | {h32_ms/model_ms:8.3f}"
+            f"{v3_ms:9.4f} | {v4_ms:9.4f} | {p128_ms:9.4f} | {p32_ms:9.4f} | {h128_ms:9.4f} | {h32_ms:9.4f} | "
+            f"{live_ms:10.4f} | {full_ms:10.4f} | {p32_ms/model_ms:8.3f} | {h32_ms/model_ms:8.3f}"
         )
 
 
